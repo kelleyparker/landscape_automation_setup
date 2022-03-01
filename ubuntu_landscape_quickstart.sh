@@ -7,5 +7,8 @@ sudo add-apt-repository ppa:landscape/19.10 && sudo apt-get install landscape-se
 #################
 # Prompt for licensing.  (L) for licensed, (F) for free
 #
-#
+# 
+echo "Are you licensing Ubuntu Landscape Server or are you using a free license?"
+echo "Licensed (L) - Free (F)"
+read licenseResponse
 
