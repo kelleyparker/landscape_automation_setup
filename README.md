@@ -137,6 +137,44 @@ Targeting a locked 60fps at `devicePixelRatio` 2 on Apple silicon:
   pass; render targets allocated once and reused.
 - No per-frame allocation in any `update()` — scratch vectors live at module scope.
 
+## State of the build
+
+An honest scorecard, judged against captured frames rather than against whether the code
+runs. "Working" is the floor here, not the goal.
+
+| Subsystem | Where it is | What is still short |
+| --- | --- | --- |
+| Ocean surface | ~85% | Deep-band colour drifts slightly cool in the far field |
+| Racing line, gates, buoys | ~85% | Line reads faint from a low chase angle |
+| Camera rigs | ~85% | — |
+| HUD, minimap, screens | ~85% | Results screen needs a real capture pass |
+| Cel / ink pipeline | ~80% | Interior Sobel lines are subtle on hull panel breaks |
+| Sky and clouds | ~75% | The sun and its flare sit outside every gameplay framing |
+| Boat geometry | ~75% | Chine crease does not read at gameplay distance; foredeck is a large low-detail surface |
+| Riders | ~75% | Limbs are smooth tapered tubes; hands are geometric |
+| Wake foam | ~65% | Still reads flat — hard-edged and correctly white, but without enough internal form to bend over the swell |
+| Race logic / AI | ~75% | Personalities are implemented but under-verified in motion |
+| Audio | untested | Synthesised and wired, but never heard — the harness runs muted |
+
+Verified: `npm run typecheck` clean, `npm run build` clean, 20 shader programs compile,
+~106 draw calls and ~219k triangles in a four-boat race, no console or page errors beyond a
+favicon 404.
+
+Three findings worth recording, because each one came from looking at a frame rather than
+reading the code:
+
+1. **Every colour in the game was double-decoded.** `Palette.ts` built colours as
+   `new THREE.Color(hex).convertSRGBToLinear()`, but three's colour management already
+   decodes hex to linear on construction. Coral's green channel fell from 0.047 to 0.0036;
+   the ink collapsed to near-black. Most "muddy" and "washed out" review notes traced back
+   to that one line.
+2. **All eight harness camera angles were rendering the same view.** `mode = 'free'` fell
+   through to `updateChase()`, so every art judgement made before that was made on frames
+   that did not show what they claimed.
+3. **The rider could never reach the yoke.** Instrumenting the rig showed the hands sitting
+   0.46 m short of the grips — a measurable fault, not an aesthetic one, and invisible in
+   any code review.
+
 ## Licence
 
 MIT.
