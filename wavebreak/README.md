@@ -10,11 +10,21 @@ built at runtime, every texture is drawn to a canvas or evaluated in a shader, a
 sound is synthesised with the Web Audio API.
 
 ```bash
+cd wavebreak
 npm install
 npm run dev
 ```
 
-Then open the printed URL. That is the whole setup.
+Then open the printed URL. That is the whole setup — install is about five seconds and
+36 packages, and nothing is downloaded at runtime.
+
+**Requirements:** Node 20.19+ or 22.12+ (Vite 8's floor — `node -v` to check), and any
+browser with WebGL2. Developed and verified against Chrome; Apple silicon is the target
+hardware. The renderer uses multiple render targets and half-float textures, both of which
+are core WebGL2, so anything from the last few years will run it.
+
+Playwright is a dev dependency for the screenshot harness only. It does **not** download a
+browser on install — the game itself never touches it.
 
 ---
 
