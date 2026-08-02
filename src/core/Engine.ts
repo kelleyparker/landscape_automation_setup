@@ -24,7 +24,14 @@ export class Engine {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
-  readonly clock = new THREE.Clock(false);
+  /**
+   * Frame timing. Hand-rolled rather than THREE.Clock, which is deprecated in
+   * r185 and logs a warning on construction. All we ever needed was a clamped
+   * delta, and owning it means the harness's fixed-step mode and the live loop
+   * share exactly one definition of "a frame".
+   */
+  private lastFrameMs = 0;
+  private clockRunning = false;
 
   /** Everything that ticks, in registration order. */
   private readonly updaters: RenderHook[] = [];
@@ -137,10 +144,11 @@ export class Engine {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.clock.start();
+    this.lastFrameMs = performance.now();
+    this.clockRunning = true;
     const loop = (): void => {
       this.rafId = requestAnimationFrame(loop);
-      const dt = Math.min(this.clock.getDelta(), 1 / 20);
+      const dt = Math.min(this.tick(), 1 / 20);
       const t0 = performance.now();
       this.step(dt);
       const t1 = performance.now();
@@ -153,7 +161,16 @@ export class Engine {
   stop(): void {
     this.running = false;
     cancelAnimationFrame(this.rafId);
-    this.clock.stop();
+    this.clockRunning = false;
+  }
+
+  /** Seconds since the previous call. Zero on the first frame after a start. */
+  private tick(): number {
+    const now = performance.now();
+    if (!this.clockRunning) { this.lastFrameMs = now; this.clockRunning = true; return 0; }
+    const dt = (now - this.lastFrameMs) / 1000;
+    this.lastFrameMs = now;
+    return dt;
   }
 
   /** One simulation + render step. */
