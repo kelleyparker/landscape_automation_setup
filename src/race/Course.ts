@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PALETTE } from '../core/Palette';
+import { PALETTE, SUN_DIR } from '../core/Palette';
 import type { Rng } from '../core/Rng';
 import { makeCelMaterial, CEL_PRESETS } from '../render/CelMaterial';
 import { OutlineMaterial, computeSmoothNormals, type OutlineOptions } from '../render/OutlineHull';
@@ -254,17 +254,49 @@ const CHOP_FADE_END = 430;
 const CAMERA_FAR = 4200;
 
 // --- racing line -------------------------------------------------------------
-/** Metres between ribbon rows. 2.5 m is ~1000 rows over the lap. */
-const RIBBON_STEP = 2.5;
-/** Half-width of the racing line ribbon, metres. */
-const RIBBON_HALF = 1.75;
+/**
+ * Metres between ribbon rows. At 2.5 m the strip's own triangulation was
+ * visible as long hard-edged wedges wherever it crossed a crest - the ribbon is
+ * displaced per *vertex*, so a row spacing coarser than the chop is a faceted
+ * approximation of a curved surface. 1.1 m is well under the shortest wave in
+ * waveConfig, and it is also what the band shading needs: the sea's normal is
+ * sampled per vertex, so the step between two shading bands lands on a triangle
+ * edge, and at a coarse spacing those edges are the wedges. 2400 rows of two
+ * vertices is one static buffer built once at load.
+ */
+const RIBBON_STEP = 1.1;
+/**
+ * Half-width of the racing line ribbon, metres. 1.75 m put a 3.5 m band down
+ * the centre of the frame - wider than the boats - which is far more line than
+ * a guidance hint needs.
+ */
+const RIBBON_HALF = 1.1;
 /** Target chevron period; the real one divides the lap exactly so it seams. */
 const CHEVRON_TARGET = 9.0;
 /** Chevron travel, metres/second, in the direction of travel. */
 const CHEVRON_SPEED = 16.0;
 /** Constant lift off the water, and the per-metre depth-buffer allowance. */
-const RIBBON_LIFT = 0.05;
+const RIBBON_LIFT = 0.035;
 const RIBBON_LIFT_SLOPE = 0.0004;
+/**
+ * Peak opacity of the racing line.
+ *
+ * The line is drawn before the wake foam and never writes depth, so foam always
+ * composites over it - but "over" is not "instead of", and at full opacity a
+ * saturated fill under a hard-edged alpha foam texture shows through every gap
+ * in the churn as a field of interlocking blocks. Under half, the ribbon reads
+ * as light *in* the water: foam covers it, spray dilutes it, and there is no
+ * depth at which it can look like a decal fighting the surface for the pixels.
+ */
+const RIBBON_OPACITY = 0.46;
+/**
+ * Where the ribbon starts fading out, and where it is gone. It used to run to
+ * 1500 m, which put stray green pixels on the horizon a kilometre and a half
+ * away, above the waterline, on the far side of the lap. The line's job is the
+ * next two corners; the gates are the long-range cue.
+ */
+const RIBBON_FADE_START = 300;
+const RIBBON_FADE_END = 640;
 /** Length of the start/finish strip along the course, metres. */
 const START_STRIP_LENGTH = 6.5;
 /** How much wider than the course the start strip and the start gate are. */
@@ -272,11 +304,27 @@ const START_WIDEN = 1.16;
 
 // --- gates -------------------------------------------------------------------
 const GATE_COUNT = 12;
-/** Height above the waterline of the banner's centre and of the lamp. */
-const BANNER_Y = 4.05;
-const BANNER_HEIGHT = 3.1;
-const BANNER_THICKNESS = 0.22;
-const LAMP_Y = 4.62;
+/**
+ * Height above the waterline of the banner's *attachment points*, and of the
+ * lamp above them.
+ *
+ * At 4.05 m the crossbar hung at exactly the height a racer occupies on screen:
+ * it entered frame left at 30% and left it at 42%, sliced through the pack in
+ * every capture, and sat parallel to the true horizon a hundred pixels below
+ * it - two competing horizontals with the road sign winning. A gate is a frame
+ * device. It has to pass overhead, so the eye reads under it to the boats.
+ */
+const BANNER_Y = 9.0;
+/**
+ * How far the middle of the span rises above its two attachment points, in
+ * metres. Positive: this is an arch, not a sag. A straight bar at any height is
+ * still a horizontal rule across the picture; a bowed one is a shape you look
+ * through, and the curve is what stops it reading as a second horizon.
+ */
+const BANNER_RISE = 3.0;
+const BANNER_HEIGHT = 2.45;
+const BANNER_THICKNESS = 0.26;
+const LAMP_Y = 9.62;
 /**
  * How much of the surface normal the moored furniture actually takes. A float
  * with any draught averages the slope under it, so leaning the full analytic
@@ -284,6 +332,26 @@ const LAMP_Y = 4.62;
  * looking hinged.
  */
 const TILT = 0.8;
+
+/**
+ * The course's own haze, deliberately much tighter than `scene.fog`.
+ *
+ * The circuit is a 2.68 km closed loop, so from anywhere on it the *far side*
+ * of the lap is in frame - six or seven gates strung along the horizon at 1 to
+ * 1.5 km. On the scene's 260/1750 fog those arrived at roughly 70% haze, which
+ * is not enough: a navy pylon at 30% strength is a black speck two pixels wide
+ * with no colour, no bands and no silhouette, and its pink banner is a striped
+ * bar that reads as a UI element stuck to the seam of the horizon. Twelve of
+ * them across the skyline is a row of dirt.
+ *
+ * The sea and the sky keep the scene's fog; only the furniture takes this one.
+ * Course objects are the smallest things in the world and the ones that reduce
+ * to noise fastest, so they are the ones that have to leave first. Inside 200 m
+ * - which is every gate the driver is actually being asked to read - this is
+ * identical to no fog at all.
+ */
+const HAZE_NEAR = 190;
+const HAZE_FAR = 880;
 
 // --- buoys -------------------------------------------------------------------
 /** Corners tighter than this get buoys down their outside edge. */
@@ -425,16 +493,27 @@ function buildPylonGeometry(): THREE.BufferGeometry {
   const dark = PALETTE.hullDark;
   const metal = PALETTE.metal;
   const trim = PALETTE.hullTrim;
+  // The mast carries the span more than twice as high as it used to, so the
+  // float grew with it - a 9 m stick on the old 1.4 m collar would read as a
+  // flagpole balanced on a saucer. The two mid-height steps are structure, not
+  // decoration: they break a very tall taper into readable lengths and give the
+  // silhouette something to be at range other than a line.
   return buildLathe([
-    { y: -1.70, r: 0.42, color: dark },
-    { y: -0.95, r: 0.98, color: dark },
-    { y: -0.22, r: 1.34, color: trim },
-    { y: 0.30, r: 1.40, color: trim },
-    { y: 0.66, r: 0.98, color: dark },
-    { y: 1.05, r: 0.60, color: metal },
-    { y: 3.85, r: 0.44, color: metal },
-    { y: 4.18, r: 0.74, color: dark },
-    { y: 4.34, r: 0.56, color: metal },
+    { y: -2.05, r: 0.50, color: dark },
+    { y: -1.10, r: 1.18, color: dark },
+    { y: -0.26, r: 1.62, color: trim },
+    { y: 0.36, r: 1.70, color: trim },
+    { y: 0.78, r: 1.18, color: dark },
+    { y: 1.20, r: 0.74, color: metal },
+    { y: 3.40, r: 0.64, color: metal },
+    { y: 3.72, r: 0.86, color: dark },
+    { y: 4.04, r: 0.60, color: metal },
+    { y: 6.60, r: 0.52, color: metal },
+    { y: 6.92, r: 0.74, color: dark },
+    { y: 7.24, r: 0.50, color: metal },
+    { y: 9.06, r: 0.44, color: metal },
+    { y: 9.30, r: 0.72, color: dark },
+    { y: 9.46, r: 0.54, color: metal },
   ], 10, 'gatePylon');
 }
 
@@ -471,17 +550,22 @@ function buildBuoyGeometry(): THREE.BufferGeometry {
  * so a wide gate and a narrow one both hang the same *shape*.
  */
 function buildBannerGeometry(): THREE.BufferGeometry {
-  const g = new THREE.BoxGeometry(1, 1, 1, 16, 3, 1);
+  // 40 segments along the span, not 16: the arch below is a parabola, and at 16
+  // it was a visible chain of straight chords across the widest object in the
+  // frame. The cost is 240 triangles on twelve instances.
+  const g = new THREE.BoxGeometry(1, 1, 1, 40, 3, 1);
   const pos = g.getAttribute('position') as THREE.BufferAttribute;
   const uvAttr = g.getAttribute('uv') as THREE.BufferAttribute;
-  const SAG = 0.30;
+  // The rise is authored in metres and converted here, so changing the banner's
+  // height does not silently change how far it arches.
+  const rise = BANNER_RISE / BANNER_HEIGHT;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const y = pos.getY(i);
     uvAttr.setXY(i, x + 0.5, y + 0.5);
-    // 1 - 4x^2 is 1 at the middle and 0 at both masts: a taut span, not a droop
-    // hanging off the ends.
-    pos.setY(i, y - SAG * (1 - 4 * x * x));
+    // 1 - 4x^2 is 1 at the middle and 0 at both masts, so the span meets each
+    // clamp exactly at its attachment point and bows up in between.
+    pos.setY(i, y + rise * (1 - 4 * x * x));
   }
   pos.needsUpdate = true;
   uvAttr.needsUpdate = true;
@@ -599,7 +683,7 @@ export class Course {
     // construction. Six independent copies is exactly the sort of thing that
     // stays correct until someone changes the fog at runtime.
     const fogColor = { value: PALETTE.skyHorizon.clone() };
-    const fogRange = { value: new THREE.Vector2(260, 1750) };
+    const fogRange = { value: new THREE.Vector2(HAZE_NEAR, HAZE_FAR) };
 
     // --- racing line + start strip ------------------------------------------
     const src = buildRaceLineShaders(LOD_WAVE_COUNT);
@@ -611,17 +695,37 @@ export class Course {
       uChopFade: { value: new THREE.Vector2(CHOP_FADE_START, CHOP_FADE_END) },
       uLift: { value: RIBBON_LIFT },
       uLiftSlope: { value: RIBBON_LIFT_SLOPE },
-      uLine: { value: PALETTE.raceLine.clone() },
-      uHot: { value: PALETTE.raceLineHot.clone() },
+      // The racing line owns a hue nothing else in the world is allowed to use.
+      //
+      // It used to be drawn in PALETTE.raceLine, which is the same value as
+      // gateLit and one step off racerP2's livery - so a green shape in frame
+      // could be a gate state, a rival, or the course, and the eye had to work
+      // out which. It is now the visor cyan, and no gate state, no livery and no
+      // HUD accent uses it.
+      //
+      // The obvious alternative was a warm accent, and it was tried first. It
+      // fails for a reason worth writing down: this ribbon is *translucent*, so
+      // whatever it is drawn in gets averaged with the water, and averaging a
+      // warm hue with cyan runs the result straight through grey. Amber at 0.3
+      // over the shallow band measured (146, 212, 154) - a muddy sage that
+      // appears nowhere in the palette. Every blend of this cyan lands on the
+      // palette instead: over deep water it reads as waterMid, over the shallow
+      // band as waterCrest, over foam as foamShade. The line can therefore carry
+      // real weight without ever staining the sea a colour the art does not own.
+      // What separates it from water is not its hue, it is that it is *drawn* -
+      // a hard-stepped sheath, a chevron cut and a hot filament up the middle.
+      uLine: { value: PALETTE.visor.clone() },
+      uHot: { value: PALETTE.foam.clone() },
       uInk: { value: PALETTE.ink.clone() },
-      // Core / body / outer glow / silhouette, across |side|. The core is narrow
-      // and the outer band wide, so the line reads as a bright filament inside a
-      // softer sheath - the classic three-tone cel glow, in hard steps.
-      uBands: { value: new THREE.Vector4(0.17, 0.56, 0.80, 0.985) },
+      uSun: { value: SUN_DIR.clone() },
+      // Core / body / sheath / alpha zero, across |side|. The first three are
+      // hard steps; the last is where the soft outer ramp finishes, and it runs
+      // well inside the geometry so the strip never shows its own edge.
+      uBands: { value: new THREE.Vector4(0.14, 0.50, 0.72, 1.0) },
       uChevron: { value: new THREE.Vector2(1 / chevronPeriod, 0.42) },
       uScroll: { value: CHEVRON_SPEED },
-      uOpacity: { value: 1 },
-      uFade: { value: new THREE.Vector2(760, 1500) },
+      uOpacity: { value: RIBBON_OPACITY },
+      uFade: { value: new THREE.Vector2(RIBBON_FADE_START, RIBBON_FADE_END) },
       uMode: { value: mode },
       uHalfWidth: { value: half },
       uCheck: { value: new THREE.Vector2(2.4, 2.8) },
@@ -645,17 +749,34 @@ export class Course {
       // a surface it agrees with exactly - so it tests depth but does not write.
       depthWrite: false,
       depthTest: true,
+      // The ribbon and the sea are the image of the same parameter space under
+      // the same map, which makes them *coplanar*, not merely close. The 3.5 cm
+      // lift in the vertex shader is a constant, and a constant is the wrong
+      // shape for a depth buffer whose resolution falls off as the square of
+      // distance; the offset is, so the two are added rather than one being
+      // tuned to cover the other. Together they take the ribbon off the sea's
+      // depth plane at every range without ever lifting it far enough to read
+      // as hovering.
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -2,
       side: THREE.DoubleSide,
     });
     this.startStripMat = this.raceLineMat.clone();
     this.startStripMat.name = 'CourseStartLine';
     this.startStripMat.uniforms = lineUniforms(1, startHalf);
     // The strip's checker is drawn in `uHot` against `uInk`; a start line is
-    // white, not green, so it takes the foam colour instead of the line's.
+    // white, not amber, so it takes the foam colour instead of the line's.
     (this.startStripMat.uniforms.uHot!.value as THREE.Color).copy(PALETTE.foam);
+    // The start line is a mark on the course, not a hint about it: it is read
+    // once, at speed, and it is allowed to be opaque.
+    this.startStripMat.uniforms.uOpacity!.value = 0.92;
 
     this.raceLine = new THREE.Mesh(this.buildRibbonGeometry(RIBBON_HALF, 0, this.totalLength), this.raceLineMat);
     this.raceLine.name = 'raceLine';
+    // Ahead of the ocean (0), behind the wake foam (4) and the spray (6). The
+    // ordering is what decides the art direction question - the foam wins, and
+    // the line runs under the churn.
     this.raceLine.renderOrder = 2;
     this.raceLine.frustumCulled = false;
     this.raceLine.matrixAutoUpdate = false;
@@ -744,12 +865,14 @@ export class Course {
       uFrame: { value: PALETTE.hullDark.clone() },
       uInk: { value: PALETTE.ink.clone() },
       uHot: { value: PALETTE.foam.clone() },
+      uSun: { value: SUN_DIR.clone() },
       uArrow: { value: new THREE.Vector3(7, 0.42, 0.55) },
       uCheck: { value: new THREE.Vector2(40, 4) },
       // Idle gates glow enough to be found at range; the lit one adds a pulse on
       // top. Both push the colour past the post stack's 0.85 bloom threshold, so
       // the halo is the composite's, not a second piece of geometry.
       uEmissive: { value: new THREE.Vector2(0.32, 0.80) },
+      uWobble: { value: new THREE.Vector3(0, 0, 0) },
       uCameraFar: { value: CAMERA_FAR },
       uFogColor: fogColor,
       uFogRange: fogRange,
@@ -765,6 +888,24 @@ export class Course {
       fog: false,
       side: THREE.DoubleSide,
     });
+    // Banner-specific overrides on the shared glow recipe.
+    //
+    // The emissive was 0.32 idle. Added on top of a tint that already sat at the
+    // channel ceiling, that is what clipped the banner to a flat (0,254,97) with
+    // white chevrons at 254 - the highest chroma and the highest value in the
+    // picture, on the largest object in it, which made the road sign the subject
+    // instead of the racer. 0.09 keeps the field reading as lit cloth; the lit
+    // gate still gains 0.5 on the pulse and still clears the bloom threshold, so
+    // "which gate is mine" is answered by the change rather than by shouting.
+    (this.bannerMat.uniforms.uEmissive!.value as THREE.Vector2).set(0.09, 0.50);
+    // 9 marks along the span, drifting slowly, with the chevron arms swept at
+    // 0.9 of a cell. The drift is a tenth of the old scroll rate: this is course
+    // furniture breathing, not an arrow telling the eye where to go.
+    (this.bannerMat.uniforms.uArrow!.value as THREE.Vector3).set(9, 0.045, 0.9);
+    // Twist amplitude, waves along the span, rate. Half a radian of twist over
+    // three and a bit waves is enough to keep the cel bands moving along the
+    // cloth without ever letting the banner look like it is flapping loose.
+    (this.bannerMat.uniforms.uWobble!.value as THREE.Vector3).set(0.42, 19.0, 0.55);
     this.lampMat = new THREE.ShaderMaterial({
       name: 'CourseGateLamp',
       glslVersion: THREE.GLSL3,
@@ -774,6 +915,11 @@ export class Course {
       lights: false,
       fog: false,
     });
+    // The lamp is a small object that has to be found at range, so it keeps most
+    // of its gain - but at 0.32/0.80 it blew to flat white with a chroma halo
+    // wider than the drum, which cost it its shape. This keeps the beacon and
+    // gives the bands back.
+    (this.lampMat.uniforms.uEmissive!.value as THREE.Vector2).set(0.20, 0.62);
 
     const bannerGeo = buildBannerGeometry();
     bannerGeo.setAttribute('aTint', this.bannerTint);
@@ -783,7 +929,11 @@ export class Course {
     this.banners.frustumCulled = false;
     this.banners.matrixAutoUpdate = false;
     this.banners.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.bannerInk = addInstancedOutline(this.banners, { thickness: 2.2, worldPad: 0.012 });
+    // The banner's single contour, at the same weight the boats carry. It is the
+    // only dark line the banner is allowed: the hem inside it is now a deep step
+    // of the banner's own hue, not a second near-black band five times heavier
+    // than every other line in the game.
+    this.bannerInk = addInstancedOutline(this.banners, { thickness: 2.5, worldPad: 0.010 });
     this.group.add(this.bannerInk, this.banners);
 
     const lampGeo = buildLampGeometry();
@@ -1407,8 +1557,12 @@ export class Course {
     const fog = this.scene.fog;
     if (!(fog instanceof THREE.Fog)) return;
     const u = this.raceLineMat.uniforms;
+    // The *colour* is the scene's, always - the course has to arrive at the same
+    // horizon everything else does. The range is the course's own, and is not
+    // read from the scene: see HAZE_NEAR.
     (u.uFogColor!.value as THREE.Color).copy(fog.color);
-    (u.uFogRange!.value as THREE.Vector2).set(fog.near, fog.far);
+    (u.uFogRange!.value as THREE.Vector2).set(
+      Math.min(HAZE_NEAR, fog.far), Math.min(HAZE_FAR, fog.far));
   }
 
   /** Global dimmer for the racing line - for the results screen or a cinematic. */

@@ -185,16 +185,33 @@ in float vDetail;
 uniform float uTime;
 
 // --- water body ------------------------------------------------------------
+/** Fifth, darkest band: the interior of a trough. See Ocean.ts. */
+uniform vec3  uBandAbyss;
 uniform vec3  uBandDeep;
 uniform vec3  uBandMid;
 uniform vec3  uBandShallow;
 uniform vec3  uBandCrest;
+/** Lowest band edge, splitting abyss from deep. */
+uniform float uBandEdge0;
 /** Band edges in 0..1 height space. Deliberately uneven - see Ocean.ts. */
 uniform vec3  uBandEdges;
 /** Fraction of WB_MAX_WAVE_HEIGHT that maps to the full 0..1 band range. */
 uniform float uBandFraction;
 /** How far the noise field is allowed to push a band edge, in height units. */
 uniform float uBandJitter;
+
+/** Subsurface tint painted into the up-facing floor of a trough. */
+uniform vec3  uDeepTint;
+uniform vec2  uDeepTintGate;
+uniform float uDeepTintCut;
+uniform float uDeepTintStrength;
+
+/**
+ * The one distance authority. x = where every drawn detail begins to thin out,
+ * y = where the sea is a single flat tone. Every mark in this shader keys off
+ * the *same* ramp, so no single screen row carries a whole transition.
+ */
+uniform vec2  uDetailFade;
 
 // --- sky response ----------------------------------------------------------
 uniform vec3  uSkyNear;
@@ -205,9 +222,22 @@ uniform vec2  uFresnelStrength;
 
 // --- backlit crest ---------------------------------------------------------
 uniform vec3  uTranslucent;
-uniform float uTransCut;
-uniform float uTransStrength;
+uniform vec3  uTranslucentHot;
+/** Two hard cuts: x = the jade band, y = the hotter lip inside it. */
+uniform vec2  uTransCut;
+uniform vec2  uTransStrength;
+/** ndl window that counts as "the sun is behind this face". */
+uniform vec2  uTransFacing;
+/** h01 window that counts as "the water here is thin". */
+uniform vec2  uTransThin;
 uniform vec2  uTransFade;
+
+// --- crest strokes ---------------------------------------------------------
+/** The tier between mid-blue and foam white: drawn light-cyan crest marks. */
+uniform vec3  uStrokeColor;
+uniform float uStrokeGain;
+uniform float uStrokeCut;
+uniform float uStrokeStrength;
 
 // --- foam ------------------------------------------------------------------
 uniform sampler2D uFoamTex;
@@ -218,6 +248,9 @@ uniform vec2  uFoamScrollA;
 uniform vec2  uFoamScrollB;
 uniform float uFoamScaleA;   // uv per metre
 uniform float uFoamScaleB;
+/** Third, small tile. Carves holes so a whitecap is never a solid plate. */
+uniform float uFoamScaleC;
+uniform float uFoamCarve;
 /** Jacobian window: x = fully foaming at or below, y = no foam at or above. */
 uniform vec2  uFoamJac;
 uniform vec2  uFoamHeightGate;
@@ -232,13 +265,33 @@ uniform float uFoamStrength;
  * y = the extra the rim grows by on the side turned away from the sun.
  */
 uniform vec2  uFoamRim;
+/**
+ * Minimum drawn width. Below a few pixels a stroke degenerates into a dashed
+ * speckle field, so once the field's screen gradient says the mark has shrunk
+ * that far, the threshold is biased down and the mark fattens back up. Density
+ * is cut instead, by the far-field term on the threshold itself.
+ */
+uniform float uFoamWidthClamp;
+/** Ink contour drawn just outside every foam silhouette. */
+uniform vec3  uFoamInk;
+uniform float uFoamInkWidth;
+uniform float uFoamInkStrength;
 
 // --- sparkle ---------------------------------------------------------------
 uniform sampler2D uSparkleTex;
 uniform sampler2D uNoiseTex;
 uniform float uNoiseScale;
 uniform float uSparkleScale;
-uniform float uSparkleLobe;
+uniform vec3  uSparkleColor;
+/** Facet-normal jitter scale (uv per metre) and strength. */
+uniform float uSparkleFacetScale;
+uniform float uSparkleRough;
+/** Hard window on the facet's alignment with the sun's half vector. */
+uniform vec2  uSparkleFacetEdges;
+/** Sun track: x = half width at the camera, y = extra half width per metre. */
+uniform vec2  uSparkleTrack;
+/** Minimum drawn star width, same principle as the foam's. */
+uniform float uSparkleWidthClamp;
 uniform float uSparkleCut;
 uniform float uSparkleRate;
 uniform float uSparkleStrength;
@@ -252,7 +305,13 @@ uniform float uWakeDarken;
 uniform float uWakeFoam;
 
 // --- atmosphere / g-buffer --------------------------------------------------
+/** The sea's own aerial perspective, stepped through three painted layers. */
+uniform vec3  uHazeA;
+uniform vec3  uHazeB;
 uniform vec3  uFogColor;
+uniform vec3  uHazeEdges;
+uniform float uHazeJitter;
+uniform float uFogCurve;
 uniform vec2  uFogRange;
 /** x = open-water interior line strength, y = extra allowed on the big crests. */
 uniform vec2  uEdgeMask;
@@ -282,10 +341,23 @@ void main() {
 
   vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uSunDir);
+  vec3 H = normalize(L + V);
   vec2 p = vParam;
 
   float ndl = dot(N, L);
   float ndv = dot(N, V);
+
+  // ------------------------------------------------------------- distance ----
+  // One ramp, used by every drawn mark below. The previous build let each term
+  // choose its own cut-off, which is why the detail all died within a few screen
+  // rows of each other and read as a hard LOD ring: the fades were narrow *and*
+  // they coincided. Sharing one wide, smoothstepped ramp spreads the loss of
+  // detail across hundreds of metres, and because it is driven by view depth the
+  // iso-lines are distance rings in world space rather than a screen-horizontal
+  // cut - a high camera sees them curve away, not step.
+  float far01 = clamp((vViewDepth - uDetailFade.x) / max(uDetailFade.y - uDetailFade.x, 1e-3), 0.0, 1.0);
+  far01 = far01 * far01 * (3.0 - 2.0 * far01);
+  float near01 = 1.0 - far01;
 
   // ------------------------------------------------------------- textures ----
   // Foam UVs are built from the *parameter* coordinate and scrolled with the two
@@ -294,27 +366,44 @@ void main() {
   // reads as water and foam that twinkles.
   vec2 uvA = (p + uFoamScrollA) * uFoamScaleA;
   vec2 uvB = (p + uFoamScrollB) * uFoamScaleB;
+  vec2 uvC = (p + uFoamScrollB) * uFoamScaleC;
   float foamA = texture(uFoamTex, uvA).r;
   float foamB = texture(uFoamTex, uvB).r;
+  float foamC = texture(uFoamTex, uvC).r;
   float foamTex = foamA * 0.58 + foamB * 0.46;
 
   vec3 noise = texture(uNoiseTex, (p + uFoamScrollA) * uNoiseScale).rgb;
 
   // --------------------------------------------------------- height bands ----
-  // Four flat colours keyed to the world height of the displaced surface. The
+  // Five flat colours keyed to the world height of the displaced surface. The
   // noise nudge is small - well under a band - but it is what stops the edges
   // reading as mathematical contour lines on a topographic map. It rides the same
   // scroll as the foam, so the wobble travels with the wave rather than sitting
   // still while the water moves under it, and it fades out at range where the
   // band edges are sub-pixel anyway.
   float h = vWorldPos.y / (WB_MAX_WAVE_HEIGHT * uBandFraction);
-  h += (noise.r - 0.5) * uBandJitter * vDetail;
+  h += (noise.r - 0.5) * uBandJitter * vDetail * near01;
   float h01 = clamp(h * 0.5 + 0.5, 0.0, 1.0);
 
-  vec3 albedo = uBandDeep;
-  albedo = mix(albedo, uBandMid,     wbStep(uBandEdges.x, h01, 0.0004, 0.5));
-  albedo = mix(albedo, uBandShallow, wbStep(uBandEdges.y, h01, 0.0004, 0.5));
-  albedo = mix(albedo, uBandCrest,   wbStep(uBandEdges.z, h01, 0.0004, 0.5));
+  // Collapse the ramp with distance, in two overlapping stages: the outer pair of
+  // bands folds into its neighbour first (five tones -> three), then the whole
+  // ramp folds into the mid tone (three -> one). Because the two stages overlap
+  // and both ride the shared far01 ramp, the far sea loses its steps gradually
+  // and arrives at the horizon as a single flat colour - which is the only way a
+  // band threshold can survive a hundred wave periods landing inside one pixel.
+  float m1 = smoothstep(0.05, 0.60, far01);
+  float m2 = smoothstep(0.40, 1.00, far01);
+  vec3 bAbyss   = mix(mix(uBandAbyss,   uBandDeep, m1), uBandMid, m2);
+  vec3 bDeep    = mix(uBandDeep,    uBandMid, m2);
+  vec3 bMid     = uBandMid;
+  vec3 bShallow = mix(uBandShallow, uBandMid, m2);
+  vec3 bCrest   = mix(mix(uBandCrest, uBandShallow, m1), uBandMid, m2);
+
+  vec3 albedo = bAbyss;
+  albedo = mix(albedo, bDeep,    wbStep(uBandEdge0,   h01, 0.0004, 0.5));
+  albedo = mix(albedo, bMid,     wbStep(uBandEdges.x, h01, 0.0004, 0.5));
+  albedo = mix(albedo, bShallow, wbStep(uBandEdges.y, h01, 0.0004, 0.5));
+  albedo = mix(albedo, bCrest,   wbStep(uBandEdges.z, h01, 0.0004, 0.5));
 
   // ------------------------------------------------------------- lighting ----
   // Same ramp path every other surface in the game uses, with the water's harder
@@ -330,21 +419,37 @@ void main() {
   col = mix(col, uSkyNear, wbStep(uFresnelEdges.x, fres, 0.0004, 0.4) * uFresnelStrength.x);
   col = mix(col, uSkyFar,  wbStep(uFresnelEdges.y, fres, 0.0004, 0.4) * uFresnelStrength.y);
 
+  // ------------------------------------------------------------ deep water ---
+  // The floor of a trough, turned up at the sun, carries a subsurface tint: the
+  // deep band then has a deep/mid read of its own instead of being one navy fill
+  // over a fifth of the frame. Hard-stepped like everything else.
+  float troughFloor = (1.0 - smoothstep(uDeepTintGate.x, uDeepTintGate.y, h01))
+                    * smoothstep(0.42, 0.86, ndl);
+  col = mix(col, uDeepTint,
+            wbStep(uDeepTintCut, troughFloor, 0.003, 0.4) * uDeepTintStrength * near01);
+
   // --------------------------------------------------- backlit translucency ---
   // Light entering the sun-facing back of a thin crest and coming out toward the
   // eye. The gate is geometric, so it fires on any crest oriented that way rather
-  // than only when the camera happens to face the sun: the surface must face the
-  // sun (ndl high) while turning away from us (ndv low), and it must be near the
-  // top of a wave where the water is thin. Looking into the sun then strengthens
-  // it. Thresholded hard, which is what turns it into a drawn band of glowing
-  // green-teal along the crest instead of a soft sheen.
-  float backLook = pow(clamp(-dot(V, L), 0.0, 1.0), 1.5);
-  float thin = smoothstep(0.36, 0.78, ndl)
-             * (1.0 - smoothstep(0.04, 0.56, ndv))
-             * smoothstep(0.56, 0.84, h01)
+  // than only when the camera happens to face the sun: the face must be turned
+  // further into the sun than flat water is (which is what makes it land on one
+  // side of a crest and not the other), and it must be near the top of a wave
+  // where the water is thin.
+  //
+  // The previous build multiplied the whole term by a view-into-sun factor that
+  // floors at 0.30 - below the 0.33 cut - so on any camera not pointed at the sun
+  // the band was arithmetically unreachable and the crest lips shaded identically
+  // on both faces. Looking into the sun now *strengthens* the term rather than
+  // being a precondition for it, and it is thresholded into its own two hard
+  // bands: jade, then a hotter lip inside it.
+  float backLook = clamp(-dot(V, L), 0.0, 1.0) * 0.5 + 0.5;
+  float lipward = 1.0 - smoothstep(0.12, 0.72, ndv);
+  float thin = smoothstep(uTransFacing.x, uTransFacing.y, ndl)
+             * smoothstep(uTransThin.x, uTransThin.y, h01)
              * (1.0 - smoothstep(uTransFade.x, uTransFade.y, vViewDepth));
-  float trans = thin * (0.30 + 0.70 * backLook);
-  col = mix(col, uTranslucent, wbStep(uTransCut, trans, 0.002, 0.3) * uTransStrength);
+  float trans = thin * (0.52 + 0.48 * lipward) * (0.62 + 0.38 * backLook);
+  col = mix(col, uTranslucent,    wbStep(uTransCut.x, trans, 0.002, 0.3) * uTransStrength.x);
+  col = mix(col, uTranslucentHot, wbStep(uTransCut.y, trans, 0.002, 0.3) * uTransStrength.y);
 
   // ------------------------------------------------------------------ foam ---
   // The Jacobian is the honest crest signal: it is < 1 exactly where the Gerstner
@@ -355,17 +460,44 @@ void main() {
   float crest = 1.0 - smoothstep(uFoamJac.x, uFoamJac.y, vJac);
   crest *= smoothstep(uFoamHeightGate.x, uFoamHeightGate.y, h01);
 
-  // At range the foam tile mips toward its own mean, which would quietly erase
-  // every distant whitecap - hence a lower bar out there. The noise nudge on top
-  // of it matters more than it looks: past the chop fade the surface is only three
-  // waves, so its crest lines are regular, and a constant threshold turns the far
-  // sea into evenly-spaced rows of white dashes that read as knitting. Jittering
-  // the bar with a low-frequency field breaks the rows without touching geometry.
-  float cut = mix(uFoamCut.y, uFoamCut.x, vDetail)
-            + (noise.b - 0.5) * uFoamCutJitter * (1.0 - vDetail);
-  float shaped = crest * uFoamGain + foamTex - cut;
+  // ------------------------------------------------------- crest strokes -----
+  // The tier the ramp was missing. Held to a *lower* bar than the foam and
+  // painted in the crest cyan rather than white, it forms a shoulder around and
+  // below every whitecap, so the sea steps mid-blue -> crest cyan -> foam instead
+  // of jumping straight to 100% white. It also seeds mark density across the
+  // whole near-to-mid field, which is what the empty blue quadrants were short of.
+  float strokeField = crest * uStrokeGain + foamTex * 0.9 - uStrokeCut;
+  float stw = clamp(fwidth(strokeField) * 0.6, 0.004, 0.35);
+  float strokeFat = smoothstep(0.03, 0.22, stw) * uFoamWidthClamp;
+  float strokeMask = smoothstep(-stw, stw, strokeField + strokeFat);
+  col = mix(col, uStrokeColor, strokeMask * uStrokeStrength * (1.0 - 0.85 * far01));
+
+  // The far-field bar goes *up*, not down. The previous build lowered it past the
+  // chop fade on the theory that the mipped tile needed help; what it actually did
+  // was detonate the foam into big flat plates just beyond the LOD ring and then
+  // into per-pixel white confetti at the horizon. Density is the thing that has to
+  // fall with distance - the surviving marks then get *wider*, not thinner, via
+  // the clamp below.
+  float cut = mix(uFoamCut.x, uFoamCut.y, far01)
+            + (noise.b - 0.5) * uFoamCutJitter * near01;
+  // A third, small tile carves holes through the interior, so a whitecap is a
+  // drawn cluster of marks rather than a solid untextured slab.
+  float shaped = crest * uFoamGain + foamTex - foamC * uFoamCarve * near01 - cut;
   float sw = clamp(fwidth(shaped) * 0.6, 0.004, 0.35);
-  float foamMask = smoothstep(-sw, sw, shaped);
+  // Minimum drawn width. fwidth is large exactly when the mark has shrunk under a
+  // few pixels, so biasing the threshold down there keeps the survivor fat: the
+  // far water resolves into fewer, larger, still-readable marks instead of a
+  // crawling field of 1px dashes. Same principle as an outline width clamp.
+  float fat = smoothstep(0.03, 0.22, sw) * uFoamWidthClamp;
+  float shapedW = shaped + fat;
+  float foamMask = smoothstep(-sw, sw, shapedW);
+
+  // Ink contour, drawn just outside the silhouette and under the fill, so the
+  // whitecap reads as a drawn shape with an edge rather than as a hole in the
+  // render. Fades on the same curve as everything else.
+  float foamOuter = smoothstep(-sw, sw, shapedW + uFoamInkWidth);
+  col = mix(col, uFoamInk,
+            clamp(foamOuter - foamMask, 0.0, 1.0) * uFoamInkStrength * near01);
 
   // Form. The core is the *same* field held to a higher bar, so it is a strict
   // subset of the patch by construction and a shaded rim always survives.
@@ -383,11 +515,14 @@ void main() {
   // texture shift was after, sourced from the geometry rather than from a guess,
   // and it costs two fewer texture fetches.
   float rimBias = uFoamRim.x + uFoamRim.y * (1.0 - smoothstep(-0.05, 0.45, ndl));
-  float foamCore = smoothstep(-sw, sw, shaped - rimBias);
+  float foamCore = smoothstep(-sw, sw, shapedW - rimBias);
   vec3 foamCol = mix(uFoamShadeColor, uFoamColor, foamCore);
   // One hard light step on the foam itself, so it sits in the same lighting as
-  // the water instead of floating above it.
+  // the water instead of floating above it, plus the water's own band edge run
+  // through it at reduced contrast - that is what carries the swell's contour
+  // across a whitecap instead of letting it flatten into a blank plate.
   foamCol *= mix(0.86, 1.06, smoothstep(-0.02, 0.16, ndl));
+  foamCol *= mix(0.90, 1.04, wbStep(uBandEdges.z, h01, 0.0004, 0.5));
   col = mix(col, foamCol, foamMask * uFoamStrength);
 
   // ------------------------------------------------------------ hull rings ---
@@ -411,32 +546,78 @@ void main() {
   col = mix(col, uFoamColor, wbStep(0.0, wakeVal, 0.004, 0.6) * uWakeFoam);
 
   // --------------------------------------------------------------- sparkle ---
-  // Manga twinkles, not specular noise. The tile of four-point stars is projected
-  // flat onto the water, gated to the sun's reflection band and to the tops of
-  // waves, then hard thresholded - so what survives is a sparse scatter of crisp
-  // white shapes. Each star carries its own phase out of the noise texture, so
-  // they blink independently instead of pulsing in unison or sliding as a field.
+  // Sun glitter, drawn rather than shaded. Three things have to agree before a
+  // star lights up, and all three are functions of WORLD position, so the field
+  // is nailed to the sea and cannot crawl with the camera:
+  //
+  //  1. The star tile - four-point manga twinkles - says a mark may exist here.
+  //  2. A high-frequency facet normal, jittered out of the noise field, is turned
+  //     close enough to the sun's half vector. This is the "specular", and it is
+  //     read through a hard window rather than a power lobe: the previous build
+  //     used pow(dot(N,H), 10) against a nearly flat sea, which for any camera
+  //     not staring into the sun evaluates to about 3e-4 and could never clear
+  //     the threshold. That is why not one highlight appeared in eight frames.
+  //  3. The fragment lies in the sun track - the elongated corridor running from
+  //     the sun's azimuth toward the camera, widening with distance. Density
+  //     falls off away from its axis rather than stopping at an edge.
+  //
+  // The result is thresholded to full-on / full-off. No falloff: a soft sparkle
+  // is a render, a hard one is a drawing.
   vec2 spUv = p * uSparkleScale;
   float sp = texture(uSparkleTex, spUv).r;
-  float starPhase = texture(uNoiseTex, spUv * 0.19).b;
-  float blink = 0.5 + 0.5 * sin(uTime * uSparkleRate + starPhase * 41.0);
-  vec3 H = normalize(L + V);
-  float sunBand = pow(max(dot(N, H), 0.0), uSparkleLobe);
-  float sparkVal = sp
-    * (0.22 + 0.90 * blink)
-    * (0.20 + 1.45 * sunBand)
-    * smoothstep(0.38, 0.76, h01)
-    * (1.0 - smoothstep(uSparkleFade.x, uSparkleFade.y, vViewDepth));
-  col += uFoamColor * wbStep(uSparkleCut, sparkVal, 0.003, 0.4) * uSparkleStrength;
+  vec3 spNoise = texture(uNoiseTex, p * uSparkleFacetScale).rgb;
+  float blink = 0.5 + 0.5 * sin(uTime * uSparkleRate + spNoise.b * 41.0);
 
-  // ------------------------------------------------------------------- fog ---
-  // Matches the scene fog exactly (Ocean.ts reads it off the scene), so the far
-  // edge of the disc arrives at the sky's own horizon colour and there is no line
-  // where the water stops. Smooth, not banded: this is atmosphere, and quantising
-  // a purely distance-driven term would stamp perfect concentric rings on the sea.
-  float fog = clamp((vViewDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1e-3), 0.0, 1.0);
-  fog = fog * fog * (3.0 - 2.0 * fog);
-  col = mix(col, uFogColor, fog);
+  vec3 Nd = normalize(N + vec3(spNoise.r - 0.5, 0.0, spNoise.g - 0.5) * uSparkleRough);
+  float facet = smoothstep(uSparkleFacetEdges.x, uSparkleFacetEdges.y, dot(Nd, H));
+
+  vec2 sunAz = normalize(uSunDir.xz + vec2(1e-5, 1e-5));
+  vec2 rel = vWorldPos.xz - cameraPosition.xz;
+  float along = dot(rel, sunAz);
+  float across = abs(dot(rel, vec2(-sunAz.y, sunAz.x)));
+  float trackW = uSparkleTrack.x + uSparkleTrack.y * max(along, 0.0);
+  float track = (1.0 - smoothstep(0.55, 1.25, across / max(trackW, 1.0)))
+              * smoothstep(-14.0, 16.0, along);
+
+  float sparkVal = sp
+    * (0.30 + 0.70 * blink)
+    * facet
+    * (0.18 + 0.92 * track)
+    * smoothstep(0.34, 0.66, h01)
+    * (1.0 - smoothstep(uSparkleFade.x, uSparkleFade.y, vViewDepth));
+  // Width clamp, exactly as on the foam. Without it the star tile minifies, the
+  // threshold clips into the mip's soft shoulder, and what reaches the screen is
+  // a 1px scatter of star *fragments* - which is the crawling specular noise the
+  // whole graphic-sparkle approach exists to avoid.
+  float spw = clamp(fwidth(sparkVal) * 0.6, 0.002, 0.4);
+  float spFat = smoothstep(0.02, 0.20, spw) * uSparkleWidthClamp;
+  float spOn = smoothstep(-spw, spw, sparkVal - uSparkleCut + spFat);
+  col = mix(col, uSparkleColor, spOn * uSparkleStrength);
+
+  // ------------------------------------------------------------------- haze ---
+  // Aerial perspective, painted in layers rather than dissolved. The water steps
+  // through two progressively desaturated tones and then into the sky's own
+  // horizon colour, so the far sea loses chroma before it loses value and the
+  // waterline dissolves instead of terminating at a cut.
+  //
+  // It is quantised because the sky is quantised and the two have to read as the
+  // same painting - but a purely radial hard step would stamp perfect concentric
+  // rings on an open sea, so the same low-frequency field that wobbles the band
+  // edges wobbles the haze edges too. That is the difference between a painted
+  // horizon and a target pattern.
+  //
+  // The final tone is deliberately held a little under the sky's, so the horizon
+  // is always readable as a line even where a pale foam band runs up against it.
+  float fogT = clamp((vViewDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1e-3), 0.0, 1.0);
+  float fog = pow(fogT, uFogCurve);
+  float fq = fog + (noise.g - 0.5) * uHazeJitter * (1.0 - fog);
+  col = mix(col, uHazeA,    wbStep(uHazeEdges.x, fq, 0.0015, 0.35));
+  col = mix(col, uHazeB,    wbStep(uHazeEdges.y, fq, 0.0015, 0.35));
+  col = mix(col, uFogColor, wbStep(uHazeEdges.z, fq, 0.0015, 0.35));
+  // Anti-aliases the disc's own silhouette against the sky: by the time the sea
+  // reaches its outer rings it is already within a hair of the horizon colour, so
+  // the stair-stepped edge has nothing left to contrast against.
+  col = mix(col, uFogColor, smoothstep(0.88, 1.0, fog));
 
   // --------------------------------------------------------------- g-buffer --
   // Low but non-zero: the Sobel pass must not scribble a line over every wave,
@@ -446,6 +627,9 @@ void main() {
   float edgeMask = uEdgeMask.x + uEdgeMask.y * smoothstep(0.70, 0.95, h01);
   edgeMask *= 1.0 - 0.55 * foamMask;
   edgeMask *= 1.0 - fog;
+  // The ink has to die on the same curve as the marks it would otherwise be
+  // outlining, or the line advertises exactly the cut the haze is dissolving.
+  edgeMask *= near01;
 
   gColor = vec4(col, 1.0);
   wbWriteGBuffer(normalize(mat3(viewMatrix) * N), vViewDepth, edgeMask);
