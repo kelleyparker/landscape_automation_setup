@@ -71,7 +71,7 @@ uniform float uWrap;          // light wrap: pushes the terminator around the fo
 /**
  * Ramp-quantised diffuse.
  *
- * `uWrap` widens the lit region before quantisation, which is what keeps the
+ * uWrap widens the lit region before quantisation, which is what keeps the
  * dark band from swallowing the underside of a round hull. The ramp texture is
  * NearestFilter, so the output is genuinely stepped - there is no interpolation
  * anywhere in this path.
@@ -84,7 +84,7 @@ vec3 wbCelDiffuse(vec3 albedo, vec3 N, vec3 L) {
 }
 
 /**
- * Banded specular: a hard-edged highlight shape. `uSpecSoftness` is deliberately
+ * Banded specular: a hard-edged highlight shape. uSpecSoftness is deliberately
  * tiny - just enough to stop the edge aliasing into a staircase at 1x, never
  * enough to read as a falloff.
  */
