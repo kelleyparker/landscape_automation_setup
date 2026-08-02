@@ -56,9 +56,12 @@ uniform sampler2D uRamp;
 uniform vec3  uSunDir;        // world space, normalised, points *toward* the sun
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
+uniform vec3  uShadowFloor;   // legibility floor for the darkest band
 uniform vec3  uRimColor;
 uniform float uRimPower;
 uniform float uRimStrength;
+uniform float uRimThreshold;
+uniform float uRimWidth;
 uniform vec3  uSpecColor;
 uniform float uSpecThreshold;
 uniform float uSpecPower;
@@ -67,20 +70,71 @@ uniform float uSpecSoftness;
 uniform sampler2D uMatcap;
 uniform float uMatcapStrength;
 uniform float uWrap;          // light wrap: pushes the terminator around the form
+uniform float uBandBias;      // slides the whole band set along the ramp
 
 /**
- * Ramp-quantised diffuse.
+ * Ramp decode scale. The ramp is an 8-bit texture but band light values run
+ * past 1.0 on the hot step, so they are stored divided by this and multiplied
+ * back here. Must stay identical to RAMP_SCALE in src/core/Textures.ts.
+ */
+const float WB_RAMP_SCALE = 1.6;
+const vec3  WB_LUMA = vec3(0.30, 0.59, 0.11);
+
+/**
+ * Ramp-quantised diffuse with authored band colour.
  *
- * uWrap widens the lit region before quantisation, which is what keeps the
- * dark band from swallowing the underside of a round hull. The ramp texture is
- * NearestFilter, so the output is genuinely stepped - there is no interpolation
- * anywhere in this path.
+ * The previous version was a straight multiply: albedo * value. On a saturated
+ * hull that is invisible - a colour with no green and no blue has nothing left
+ * to darken, so every band clipped to the same orange and the hero asset read
+ * as one flat fill. So each band now carries its own authored light colour and
+ * a wash amount:
+ *
+ *   wash = 0  -> pure multiply, hue preserved, the object's identity colour
+ *   wash = 1  -> the band's own colour laid over the albedo's brightness
+ *
+ * The shadow steps wash toward magenta-violet (sky bounce) and the top step
+ * toward warm cream, so adjacent bands separate by hue as well as by value and
+ * the quantisation survives the saturation lift in the post grade.
+ *
+ * uBandBias slides the whole set along the ramp. It exists so a symmetric
+ * standing figure does not get its terminator on the centreline: pushing the
+ * bias positive walks the boundary around toward three-quarters across.
+ *
+ * The ramp texture is NearestFilter, so band edges are hard - there is no
+ * interpolated transition value anywhere in this path.
  */
 vec3 wbCelDiffuse(vec3 albedo, vec3 N, vec3 L) {
   float ndl = dot(N, L);
-  float t = clamp((ndl + uWrap) / (1.0 + uWrap), 0.0, 1.0);
+  float t = clamp((ndl + uWrap) / (1.0 + uWrap) + uBandBias, 0.0, 1.0);
   vec4 ramp = texture(uRamp, vec2(t, 0.5));
-  return albedo * ramp.rgb * uSunColor + albedo * uAmbient * (1.0 - ramp.a * 0.55);
+
+  vec3 bandLight = ramp.rgb * WB_RAMP_SCALE;
+  float wash = ramp.a;
+
+  // Hue-preserving path.
+  vec3 mult = albedo * bandLight * uSunColor;
+  // Authored path: the band colour, scaled by how bright the albedo is so a
+  // dark object does not get washed to the same value as a light one. The
+  // constant term is deliberately small - a large one greys out anything dark,
+  // which turned the boat cowling into warm putty instead of navy.
+  float alum = dot(albedo, WB_LUMA);
+  vec3 washed = bandLight * uSunColor * (0.10 + 0.90 * alum);
+
+  vec3 col = mix(mult, washed, wash);
+  col += albedo * uAmbient * 0.28;
+
+  // Nothing in a cel-shaded frame sits at zero. The ink line carries the black,
+  // the fill never does - a 0-2% luma mass reads as missing geometry, not as
+  // shadow. Lift only what is already below the floor, and lift it toward a
+  // cool navy so the darks stay a colour rather than becoming grey.
+  // Squared so the lift falls away fast: a mass that was already near the floor
+  // keeps most of its own variation instead of being crushed flat onto it.
+  float lum = dot(col, WB_LUMA);
+  float floorLum = dot(uShadowFloor, WB_LUMA);
+  float k = clamp(1.0 - lum / max(floorLum, 1e-4), 0.0, 1.0);
+  col += uShadowFloor * k * k;
+
+  return col;
 }
 
 /**
@@ -98,20 +152,43 @@ vec3 wbCelSpecular(vec3 N, vec3 V, vec3 L) {
 }
 
 /**
- * Fresnel rim. Biased toward the side away from the key light so it reads as a
- * backlight separating the silhouette from the water, which is the entire point.
+ * Rim light. Not a fresnel falloff - a drawn band.
+ *
+ * The threshold is hard and the only softening is one screen-space derivative
+ * wide, so the rim is a constant-width contour at any distance instead of a
+ * glow that fades out as the object shrinks. That constancy is the point: it is
+ * what stops a distant racer merging into the wake shadow.
+ *
+ * It is weighted toward the up-facing and away-from-key edges so it reads as
+ * sky bounce rather than as a second light, and it never switches off with
+ * depth.
  */
 vec3 wbCelRim(vec3 N, vec3 V, vec3 L) {
   float f = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), uRimPower);
-  float back = smoothstep(-0.45, 0.75, dot(-L, V) * 0.5 + dot(N, L) * 0.5);
-  float rim = smoothstep(0.32, 0.46, f * (0.35 + 0.85 * back));
-  return uRimColor * rim * uRimStrength;
+  float w = max(fwidth(f), 1e-4);
+  float band = smoothstep(uRimThreshold - w, uRimThreshold + w, f);
+  float core = smoothstep(uRimThreshold + uRimWidth - w, uRimThreshold + uRimWidth + w, f);
+  // Sky bounce lands on what faces up and on what faces away from the key.
+  float up   = clamp(N.y * 0.45 + 0.66, 0.0, 1.0);
+  float away = clamp(0.52 + 0.48 * (1.0 - max(dot(N, L), 0.0)), 0.0, 1.0);
+  return uRimColor * (band * 0.68 + core * 0.52) * up * away * uRimStrength;
 }
 
-/** Matcap lookup - the only "environment" in the game. */
+/**
+ * Matcap lookup - the only "environment" in the game.
+ *
+ * The sample is re-quantised after the fetch. The texture is drawn as hard
+ * concentric bands, but a 256px matcap minified onto a 20px prop is mipmapped
+ * into a smooth radial gradient, which is exactly how the gate pylons and the
+ * boat headlamp ended up reading as PBR. Quantising the fetched value restores
+ * hard steps at any size.
+ */
 vec3 wbMatcap(vec3 viewNormal) {
   vec2 uv = viewNormal.xy * 0.49 + 0.5;
-  return texture(uMatcap, uv).rgb;
+  vec3 m = texture(uMatcap, uv).rgb;
+  float v = max(max(m.r, m.g), m.b);
+  float q = floor(v * 4.0) * 0.25 + 0.125;
+  return m * (q / max(v, 1e-4));
 }
 `;
 

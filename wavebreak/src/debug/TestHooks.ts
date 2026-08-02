@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { Game } from '../Game';
 import type { BoatInput } from '../core/types';
+import { SHOT_NAMES } from '../core/CameraRig';
 
 /**
  * The screenshot harness's entire surface area.
@@ -16,103 +17,24 @@ export interface ShotSpec {
   apply(g: Game, cam: THREE.PerspectiveCamera): void;
 }
 
-const _v = new THREE.Vector3();
-const _f = new THREE.Vector3();
-
-/** Camera setups the critic looks at. Each isolates a different claim. */
-export const SHOTS: ShotSpec[] = [
-  {
-    // The money shot: what the player actually sees.
-    name: 'chase',
-    apply: (g) => { g.cameraRig.mode = 'chase'; g.cameraRig.update(1 / 60, g.engine.elapsed, g.player, g.status); },
+/**
+ * Camera setups the critic looks at. Each isolates a different claim.
+ *
+ * The poses themselves live in `CameraRig.applyShot` - a shot is a rig, not a
+ * one-frame camera nudge. Posing the camera from here was the bug that made all
+ * eight named shots come out as the same chase frame: the rig's `update()` ran
+ * again on every rendered frame and overwrote whatever this file had set.
+ */
+export const SHOTS: ShotSpec[] = SHOT_NAMES.map((name) => ({
+  name,
+  apply: (g: Game) => {
+    g.cameraRig.applyShot(name, {
+      player: g.player,
+      racers: g.racers,
+      elapsed: g.engine.elapsed,
+    });
   },
-  {
-    // Low, close to the water: judges wave silhouette, foam and band edges.
-    name: 'lowwater',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      _f.set(Math.sin(s.heading), 0, Math.cos(s.heading));
-      cam.position.copy(s.position).addScaledVector(_f, -7).add(_v.set(2.2, 0.55, 0));
-      cam.lookAt(s.position.x + _f.x * 12, s.position.y + 0.6, s.position.z + _f.z * 12);
-      cam.fov = 62; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // Bow-on hero angle: judges hull outlines, rider pose, rim light.
-    name: 'bow',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      _f.set(Math.sin(s.heading), 0, Math.cos(s.heading));
-      cam.position.copy(s.position).addScaledVector(_f, 9).add(_v.set(0, 2.1, 0));
-      cam.lookAt(s.position.x, s.position.y + 0.9, s.position.z);
-      cam.fov = 44; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // Tight on the rider: the pose has to read as a person, not a prop.
-    name: 'rider',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      _f.set(Math.sin(s.heading), 0, Math.cos(s.heading));
-      const side = _v.set(_f.z, 0, -_f.x);
-      cam.position.copy(s.position).addScaledVector(side, 3.6).addScaledVector(_f, 1.2);
-      cam.position.y = s.position.y + 1.9;
-      cam.lookAt(s.position.x, s.position.y + 1.15, s.position.z);
-      cam.fov = 34; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // High and wide: judges the infinite ocean, tiling, LOD seams, horizon, sky.
-    name: 'aerial',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      _f.set(Math.sin(s.heading), 0, Math.cos(s.heading));
-      cam.position.copy(s.position).addScaledVector(_f, -46).add(_v.set(0, 34, 0));
-      cam.lookAt(s.position.x + _f.x * 90, 0, s.position.z + _f.z * 90);
-      cam.fov = 60; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // Horizon-level: judges sky gradient, clouds, sun flare, fog blend.
-    name: 'horizon',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      cam.position.set(s.position.x, s.position.y + 3.2, s.position.z);
-      cam.lookAt(s.position.x - 60, s.position.y + 16, s.position.z + 85);
-      cam.fov = 66; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // The wake, from behind and above: judges ribbon persistence and spread.
-    name: 'wake',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const s = g.player.state;
-      _f.set(Math.sin(s.heading), 0, Math.cos(s.heading));
-      cam.position.copy(s.position).addScaledVector(_f, -17).add(_v.set(0, 9.5, 0));
-      cam.lookAt(s.position.x - _f.x * 4, s.position.y, s.position.z - _f.z * 4);
-      cam.fov = 55; cam.updateProjectionMatrix();
-    },
-  },
-  {
-    // The whole pack + course furniture: judges gates, race line, AI spacing.
-    name: 'pack',
-    apply: (g, cam) => {
-      g.cameraRig.mode = 'free';
-      const c = _v.set(0, 0, 0);
-      for (const b of g.racers) c.add(b.state.position);
-      c.multiplyScalar(1 / Math.max(1, g.racers.length));
-      cam.position.set(c.x + 24, 16, c.z - 30);
-      cam.lookAt(c.x, 0.5, c.z);
-      cam.fov = 55; cam.updateProjectionMatrix();
-    },
-  },
-];
+}));
 
 export interface WavebreakHooks {
   ready: boolean;

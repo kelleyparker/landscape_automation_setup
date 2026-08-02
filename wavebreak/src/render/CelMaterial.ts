@@ -29,6 +29,24 @@ export interface CelOptions {
   rimColor?: THREE.Color;
   rimPower?: number;
   rimStrength?: number;
+  /**
+   * Where the rim band starts, in 0..1 fresnel space. Hard threshold, not a
+   * falloff. Lower = wider contour.
+   */
+  rimThreshold?: number;
+  /** Distance from the outer rim edge to the hotter inner step. */
+  rimWidth?: number;
+  /**
+   * Slides the whole diffuse band set along the ramp. Positive walks the
+   * terminator toward the shadow side, which is how a symmetric figure avoids a
+   * terminator down its own centreline.
+   */
+  bandBias?: number;
+  /**
+   * Floor colour for the darkest band. Nothing rendered through this material
+   * is allowed below its luma - a near-black fill reads as missing geometry.
+   */
+  shadowFloor?: THREE.Color;
   specColor?: THREE.Color;
   specThreshold?: number;
   specPower?: number;
@@ -57,10 +75,13 @@ export interface CelOptions {
 }
 
 const DEFAULTS: Required<Omit<CelOptions,
-  'ramp' | 'matcap' | 'uniforms' | 'vertexHead' | 'vertexBody' | 'fragmentHead' | 'fragmentBody' | 'defines' | 'name' | 'side' | 'color' | 'rimColor' | 'specColor'>> = {
-  matcapStrength: 0.16,
-  rimPower: 2.6,
-  rimStrength: 0.85,
+  'ramp' | 'matcap' | 'uniforms' | 'vertexHead' | 'vertexBody' | 'fragmentHead' | 'fragmentBody' | 'defines' | 'name' | 'side' | 'color' | 'rimColor' | 'specColor' | 'shadowFloor'>> = {
+  matcapStrength: 0.1,
+  rimPower: 2.2,
+  rimStrength: 0.9,
+  rimThreshold: 0.52,
+  rimWidth: 0.2,
+  bandBias: 0,
   specThreshold: 0.62,
   specPower: 44,
   specStrength: 0.9,
@@ -73,6 +94,14 @@ const DEFAULTS: Required<Omit<CelOptions,
   opacity: 1,
   depthWrite: true,
 };
+
+/**
+ * The floor every solid surface is lifted to. A cool navy, not a grey: the
+ * darks in this palette are a colour, and lifting toward neutral would drain
+ * them. Sits at roughly 13% luma, which is the point where a mass stops reading
+ * as a hole in the model and starts reading as shadow.
+ */
+const SHADOW_FLOOR = new THREE.Color(0.028, 0.045, 0.135);
 
 export class CelMaterial extends THREE.ShaderMaterial {
   declare uniforms: Record<string, THREE.IUniform>;
@@ -89,9 +118,13 @@ export class CelMaterial extends THREE.ShaderMaterial {
       uSunDir: { value: SUN_DIR.clone() },
       uSunColor: { value: new THREE.Color(1.0, 0.985, 0.94) },
       uAmbient: { value: AMBIENT.clone() },
+      uShadowFloor: { value: (opts.shadowFloor ?? SHADOW_FLOOR).clone() },
+      uBandBias: { value: o.bandBias },
       uRimColor: { value: rimColor.clone() },
       uRimPower: { value: o.rimPower },
       uRimStrength: { value: o.rimStrength },
+      uRimThreshold: { value: o.rimThreshold },
+      uRimWidth: { value: o.rimWidth },
       uSpecColor: { value: specColor.clone() },
       uSpecThreshold: { value: o.specThreshold },
       uSpecPower: { value: o.specPower },
@@ -204,7 +237,8 @@ void main() {
 ${opts.fragmentBody ?? ''}
 
   vec3 col = wbCelDiffuse(albedo, N, L);
-  col += wbCelSpecular(N, V, L) * albedo * 0.35 + wbCelSpecular(N, V, L) * 0.65;
+  vec3 spec = wbCelSpecular(N, V, L);
+  col += spec * (albedo * 0.35 + 0.65);
   col += wbCelRim(N, V, L);
   col += wbMatcap(normalize(vViewNormal)) * uMatcapStrength * albedo;
   col += albedo * uEmissive;
@@ -233,54 +267,99 @@ export function makeCelMaterial(opts: CelOptions = {}): CelMaterial {
 // -------------------------------------------------------------------------
 
 export const CEL_PRESETS = {
-  /** Glossy painted hull: tight hot spec, strong rim. */
+  /**
+   * Glossy painted hull.
+   *
+   * The matcap is held right down. It used to sit at 0.2 and, minified onto a
+   * hull, it smeared a soft radial gradient across exactly the planes the band
+   * step was supposed to break - the hull ended up one flat fill with a
+   * gradient on top. The banding does the work now; the matcap is a garnish.
+   *
+   * Rim is on hard and always: the hull's shadow side sits against deep water
+   * of almost the same value, and a thin ink line alone is not enough to keep
+   * them apart at distance.
+   */
   hull: (color: THREE.Color): CelOptions => ({
     color,
     matcap: TEX.matcapGloss,
-    matcapStrength: 0.2,
+    matcapStrength: 0.08,
     specPower: 62,
     specThreshold: 0.55,
-    specStrength: 1.0,
+    specStrength: 0.85,
     rimColor: PALETTE.waterCrest,
-    rimStrength: 1.0,
-    rimPower: 2.4,
-    wrap: 0.2,
+    rimStrength: 1.25,
+    rimPower: 2.0,
+    rimThreshold: 0.46,
+    rimWidth: 0.24,
+    wrap: 0.18,
+    bandBias: 0.06,
     edgeMask: 1.0,
   }),
-  /** Brushed metal trim: broader spec, cooler matcap. */
+  /**
+   * Brushed metal trim and hard-surface course furniture.
+   *
+   * The matcap was carrying this material at 0.45, which is why a gate pylon
+   * read as a smoothly shaded cylinder: the ramp bands were there but a
+   * mip-averaged radial gradient sat over the top of them at nearly half
+   * strength. Down to 0.14, and the diffuse bands carry the form.
+   */
   metal: (color: THREE.Color): CelOptions => ({
     color,
     matcap: TEX.matcapMetal,
-    matcapStrength: 0.45,
+    matcapStrength: 0.14,
     specPower: 28,
     specThreshold: 0.48,
-    specStrength: 1.2,
-    rimStrength: 0.7,
-    wrap: 0.12,
+    specStrength: 1.0,
+    rimColor: PALETTE.waterCrest,
+    rimStrength: 1.0,
+    rimPower: 2.0,
+    rimThreshold: 0.5,
+    rimWidth: 0.22,
+    wrap: 0.08,
     edgeMask: 0.9,
   }),
   /** Skin: soft wrap, almost no spec, warm bounce from the matcap. */
   skin: (color: THREE.Color): CelOptions => ({
     color,
     matcap: TEX.matcapSkin,
-    matcapStrength: 0.22,
+    matcapStrength: 0.12,
     specPower: 20,
     specThreshold: 0.86,
     specStrength: 0.25,
     rimColor: PALETTE.sunGlow,
-    rimStrength: 0.75,
-    rimPower: 3.0,
-    wrap: 0.42,
+    rimStrength: 0.9,
+    rimPower: 2.6,
+    rimThreshold: 0.5,
+    rimWidth: 0.22,
+    wrap: 0.34,
+    bandBias: 0.1,
     edgeMask: 0.55,
   }),
-  /** Matte fabric / rubber: no matcap, no spec, wide wrap. */
+  /**
+   * Matte fabric / rubber - the rider's suit.
+   *
+   * bandBias is the load-bearing value here. With the bias at zero the
+   * terminator landed on the centreline of a symmetric standing figure and cut
+   * it into two flat panels. Pushing it positive walks the boundary around to
+   * roughly three-quarters across the torso, so the lit side reads as the front
+   * of a volume and the shadow as its turning edge. The wrap is tighter than it
+   * was for the same reason: a wide wrap flattens the step out along the ribs.
+   *
+   * The rim is cream rather than cyan: the rider has to separate from the hull
+   * as well as from the water, and the hull's rim is already cyan.
+   */
   cloth: (color: THREE.Color): CelOptions => ({
     color,
     matcap: null,
     specStrength: 0.12,
     specThreshold: 0.9,
-    rimStrength: 0.65,
-    wrap: 0.34,
+    rimColor: PALETTE.foam,
+    rimStrength: 1.15,
+    rimPower: 2.0,
+    rimThreshold: 0.44,
+    rimWidth: 0.24,
+    wrap: 0.3,
+    bandBias: 0.14,
     edgeMask: 0.8,
   }),
   /** Glowing course furniture: mostly emissive, no interior lines. */

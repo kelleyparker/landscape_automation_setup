@@ -41,50 +41,75 @@ function finishCanvas(cv: HTMLCanvasElement, opts: { srgb?: boolean; linearFilte
 export interface RampBand {
   /** Upper bound of this band in 0..1 lighting space. */
   upto: number;
-  /** Multiplier applied to albedo inside the band. >1 blows the highlight out. */
-  value: number;
-  /** Hue push: colour the band is tinted toward, and how far. */
-  tint?: THREE.Color;
-  tintAmount?: number;
+  /**
+   * The band's authored light colour, carrying its value in its magnitude:
+   * (1,1,1) is a fully lit neutral step, (0.34,0.13,0.30) a dark violet one.
+   * Channels may exceed 1 up to RAMP_SCALE for a blown-out top step.
+   */
+  light: THREE.Color;
+  /**
+   * How far the band abandons multiply and lays its own colour over the albedo.
+   * 0 keeps the object's identity hue, 1 is a full wash. Anything above about
+   * 0.5 rotates the hue visibly, which is the only way a shadow reads as cool
+   * on an albedo that already has no blue left in it.
+   */
+  wash?: number;
 }
 
 /**
- * The lighting ramp. Hard bands, no interpolation, cool shadows and a warm
- * top step - the tint shift is what stops quantised shading reading as grey mush.
+ * Ramp value scale. Band light values run past 1.0 on the hot step, so the
+ * 8-bit texture stores them divided by this. Must stay identical to
+ * WB_RAMP_SCALE in src/render/shaders/celChunks.ts.
+ */
+export const RAMP_SCALE = 1.6;
+
+/**
+ * The lighting ramp for hulls, riders and hard-surface props.
  *
- * These thresholds were tuned against captured frames, not chosen by default:
- * the terminator sits at 0.50 so it lands mid-form on a round hull, the deep
- * band is narrow so shadows stay graphic, and the top band is small so the hot
- * step reads as a highlight rather than a second base colour.
+ * Authored, not computed. The old ramp was a value multiplier with a faint tint
+ * lerp, which on a saturated hull produced base * 0.65 - the same hue at two
+ * brightnesses, the grey-mush failure mode with the grey replaced by orange.
+ * Every band here has its own colour:
+ *
+ *   band 0  occlusion pocket   deep violet-navy, near-full wash
+ *   band 1  core shadow        magenta-violet, reads as sky-ambient bounce
+ *   band 2  base / key         near-neutral, the object's own colour
+ *   band 3  hot step           warm cream pushed toward yellow
+ *
+ * Against a coral hull those land at roughly sRGB (126,59,107), (163,72,119),
+ * (247,107,128) and (248,159,137) - 46-plus luma between the core shadow and
+ * the base and a hue rotation on top of it, so the steps read at 1x rather than
+ * needing a pixel probe to find.
+ *
+ * Thresholds: the main terminator sits at 0.46 rather than 0.50 so it walks
+ * further around a round form instead of bisecting it, the occlusion band is
+ * narrow so it only catches genuine pockets, and the hot step is small so it
+ * reads as a highlight and not as a second base colour.
  */
 export const DEFAULT_BANDS: RampBand[] = [
-  { upto: 0.34, value: 0.34, tint: new THREE.Color(0.24, 0.42, 0.86), tintAmount: 0.52 },
-  { upto: 0.50, value: 0.60, tint: new THREE.Color(0.36, 0.55, 0.95), tintAmount: 0.26 },
-  { upto: 0.80, value: 0.94, tint: new THREE.Color(1.0, 1.0, 1.0), tintAmount: 0.0 },
-  { upto: 1.01, value: 1.14, tint: new THREE.Color(1.0, 0.96, 0.80), tintAmount: 0.22 },
+  { upto: 0.30, light: new THREE.Color(0.19, 0.07, 0.25), wash: 0.74 },
+  { upto: 0.46, light: new THREE.Color(0.50, 0.19, 0.42), wash: 0.62 },
+  { upto: 0.86, light: new THREE.Color(1.00, 0.92, 0.79), wash: 0.22 },
+  { upto: 1.01, light: new THREE.Color(1.30, 0.98, 0.58), wash: 0.62 },
 ];
 
 const RAMP_W = 128;
 
 /**
- * Builds an RGBA ramp: rgb = per-band tint premultiplied by value, a = raw value.
- * Shaders do `albedo * rampRGB` for the tinted result, or use `.a` alone when a
- * neutral step is wanted (foam, ink).
+ * Builds an RGBA ramp: rgb = the band's authored light colour scaled into 0..1
+ * by RAMP_SCALE, a = the band's wash amount. `wbCelDiffuse` mixes the multiply
+ * result toward the washed result by that alpha.
  */
 export function makeRampTexture(bands: RampBand[] = DEFAULT_BANDS): THREE.DataTexture {
   const data = new Uint8Array(RAMP_W * 4);
+  const enc = (v: number): number => Math.max(0, Math.min(255, Math.round((v / RAMP_SCALE) * 255)));
   for (let i = 0; i < RAMP_W; i++) {
     const x = (i + 0.5) / RAMP_W;
     const band = bands.find((b) => x < b.upto) ?? bands[bands.length - 1]!;
-    const tint = band.tint ?? new THREE.Color(1, 1, 1);
-    const amt = band.tintAmount ?? 0;
-    const r = (1 - amt + amt * tint.r) * band.value;
-    const g = (1 - amt + amt * tint.g) * band.value;
-    const b = (1 - amt + amt * tint.b) * band.value;
-    data[i * 4 + 0] = Math.min(255, Math.round(r * 200));
-    data[i * 4 + 1] = Math.min(255, Math.round(g * 200));
-    data[i * 4 + 2] = Math.min(255, Math.round(b * 200));
-    data[i * 4 + 3] = Math.min(255, Math.round(band.value * 200));
+    data[i * 4 + 0] = enc(band.light.r);
+    data[i * 4 + 1] = enc(band.light.g);
+    data[i * 4 + 2] = enc(band.light.b);
+    data[i * 4 + 3] = Math.max(0, Math.min(255, Math.round((band.wash ?? 0) * 255)));
   }
   const tex = new THREE.DataTexture(data, RAMP_W, 1, THREE.RGBAFormat);
   // NearestFilter is mandatory - this is the whole point of the ramp.
@@ -104,6 +129,11 @@ export function makeRampTexture(bands: RampBand[] = DEFAULT_BANDS): THREE.DataTe
  * A hand-painted-looking matcap: two hard sky bands top, a warm bounce band at
  * the bottom, and a hot rim arc. This is the *only* form of environment
  * reflection in the game - there is no cubemap probe anywhere.
+ *
+ * The stops are spaced wide in value on purpose. A matcap gets minified hard
+ * onto small props, and once the mip chain has averaged two neighbouring bands
+ * together the only thing that keeps the step visible is how far apart they
+ * started. `wbMatcap` re-quantises on top of this.
  */
 export function makeMatcap(kind: 'gloss' | 'metal' | 'skin' = 'gloss'): THREE.Texture {
   const S = 256;
@@ -356,12 +386,17 @@ class TextureCache {
 
   get ramp(): THREE.DataTexture { return (this._ramp ??= makeRampTexture()); }
 
-  /** Water uses a harder 3-step ramp - the sea reads flatter than a hull. */
+  /**
+   * Water uses a harder 3-step ramp - the sea reads flatter than a hull, and the
+   * ocean shader does most of its own banding off wave height. Kept close to a
+   * pure multiply (low wash) so the ocean's authored band colours stay theirs;
+   * the steps are just pushed further apart than they were.
+   */
   get rampWater(): THREE.DataTexture {
     return (this._rampWater ??= makeRampTexture([
-      { upto: 0.46, value: 0.46, tint: new THREE.Color(0.28, 0.44, 0.98), tintAmount: 0.5 },
-      { upto: 0.72, value: 0.86, tint: new THREE.Color(0.55, 0.85, 1.0), tintAmount: 0.18 },
-      { upto: 1.01, value: 1.2, tint: new THREE.Color(1.0, 1.0, 0.92), tintAmount: 0.18 },
+      { upto: 0.46, light: new THREE.Color(0.20, 0.25, 0.42), wash: 0.10 },
+      { upto: 0.74, light: new THREE.Color(0.62, 0.68, 0.74), wash: 0.06 },
+      { upto: 1.01, light: new THREE.Color(1.04, 1.02, 0.94), wash: 0.10 },
     ]));
   }
 

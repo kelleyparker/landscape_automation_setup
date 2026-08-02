@@ -142,6 +142,11 @@ out float vSide;
 out float vDist;
 out float vViewDepth;
 out vec3  vViewNormal;
+/** The *water's* normal in world space, so the ribbon can take the sea's own
+    band shading instead of reading as a decal painted flat on top of it. */
+out vec3  vWorldNormal;
+/** Displaced height in metres: negative in a trough, positive on a crest. */
+out float vHeight;
 /** Horizontal Jacobian: < 1 where the surface is being pinched, i.e. at a crest. */
 out float vJac;
 
@@ -186,6 +191,8 @@ void main() {
   vec4 mv = viewMatrix * vec4(pos, 1.0);
   vViewDepth = -mv.z;
   vViewNormal = normalize(mat3(viewMatrix) * nrm);
+  vWorldNormal = nrm;
+  vHeight = pos.y;
   vSide = aSide;
   vDist = aDist;
   vJac = jac;
@@ -205,13 +212,17 @@ in float vSide;
 in float vDist;
 in float vViewDepth;
 in vec3  vViewNormal;
+in vec3  vWorldNormal;
+in float vHeight;
 in float vJac;
 
 uniform float uTime;
 uniform vec3  uLine;      // body colour
 uniform vec3  uHot;       // core + chevron colour
-uniform vec3  uInk;       // the drawn edge, and the dark checker square
-/** Band edges across |side|: x core, y body, z outer glow, w silhouette. */
+uniform vec3  uInk;       // the dark checker square on the start strip
+/** Key light, world space. Same vector the sea and the hulls are lit by. */
+uniform vec3  uSun;
+/** Band edges across |side|: x core, y body, z sheath, w where alpha reaches 0. */
 uniform vec4  uBands;
 /** x = 1 / chevron period (per metre), y = how far the V is swept back. */
 uniform vec2  uChevron;
@@ -232,13 +243,21 @@ void main() {
   float across = vSide * uHalfWidth;
 
   // --------------------------------------------------------- racing line ----
-  // Four concentric hard bands. The outermost is ink, not transparency: a glow
-  // that fades out at its edge is a render, a glow bounded by a drawn line is a
-  // cel. Everything below is a step, never a gradient.
-  float mEdge = wbInside(uBands.w, a, 0.35);
+  // Three concentric hard colour bands, and a *soft* outer boundary.
+  //
+  // The band edges are still one-pixel steps - this is cel art and the interior
+  // of the ribbon is drawn, not rendered. The silhouette is the exception. An
+  // ink-bounded, fully opaque edge is right for an object; the racing line is
+  // not an object, it is a hint projected onto water that already has foam,
+  // spray and chop drawn over it. A hard edge there gives the triangle strip a
+  // sawtooth boundary and lets the ribbon interlock with every foam island it
+  // crosses, which is exactly the artefact this ramp removes: past uBands.z the
+  // alpha simply runs out, so the ribbon dissolves under the churn instead of
+  // fighting it for the same pixels.
   float mGlow = wbInside(uBands.z, a, 0.35);
   float mBody = wbInside(uBands.y, a, 0.35);
   float mCore = wbInside(uBands.x, a, 0.35);
+  float mEdge = 1.0 - smoothstep(uBands.z, uBands.w, a);
 
   // Chevrons. Skewing the phase by |side| turns a band across the ribbon into a
   // V pointing the way the boats travel; scrolling the same phase with time
@@ -255,20 +274,39 @@ void main() {
   float arrow = wbInside(0.44, phase, 0.35);
   float chevRule = wbInside(0.07, phase, 0.35);
 
-  vec3 line = uInk;
-  line = mix(line, uLine * 0.42, mGlow);
-  line = mix(line, uLine * 0.74, mBody);
-  line = mix(line, uHot, arrow * mBody);
-  line = mix(line, uInk, chevRule * mBody * 0.82);
+  // Every band is kept *bright*. That is not a stylistic preference, it is what
+  // makes the line disappear under foam: a light value composited over
+  // whitewater moves it by almost nothing, and over the deep blue of an
+  // untouched trough it is a clear filament. The line therefore fades out
+  // exactly where the churn is, without ever being told where the churn is. A
+  // dark band here does the opposite - it stains the foam grey, which is what
+  // the old ink separator did.
+  vec3 line = uLine * 0.72;
+  line = mix(line, uLine * 0.88, mGlow);
+  line = mix(line, uLine, mBody);
+  line = mix(line, uHot * 1.02, arrow * mBody);
+  line = mix(line, uLine * 0.62, chevRule * mBody * 0.6);
   // The core filament runs unbroken through the arrows, so the line still reads
   // as one continuous path at a glance rather than as a row of separate marks.
-  line = mix(line, uHot * 1.1, mCore);
+  line = mix(line, uHot * 1.05, mCore);
 
   // The line flares where the water is pinching itself together, i.e. exactly on
   // a crest. It is the same Jacobian the ocean's foam keys off, so the line
   // brightens on the same water that goes white - the two read as one surface.
   float crest = 1.0 - smoothstep(0.93, 1.01, vJac);
-  line += uHot * crest * 0.22 * mBody;
+  line += uHot * crest * 0.14 * mBody;
+
+  // --- the ribbon is lit by the sea it lies on -------------------------------
+  // The vertices already ride the Gerstner surface, so the ribbon has the right
+  // *shape*; without this it still has the wrong *value*, because a constant
+  // fill over a banded sea is exactly what a decal looks like. Two hard steps
+  // off the same key light the water uses, then a smooth trough term from the
+  // displaced height, so the line goes dark in the hollows and comes up on the
+  // lit faces along with the band under it.
+  float ndl = dot(normalize(vWorldNormal), uSun);
+  float shade = 0.78 + 0.16 * wbCrisp(0.62, ndl, 0.5) + 0.18 * wbCrisp(0.86, ndl, 0.5);
+  shade *= 0.88 + 0.24 * smoothstep(-1.5, 1.3, vHeight);
+  line *= shade;
 
   // ---------------------------------------------------- start/finish strip ---
   // A checker sized in metres, so the squares stay square however wide the
@@ -278,7 +316,14 @@ void main() {
   float mStrip = wbInside(uBands.w, a, 0.35);
 
   vec3 col = mix(line, strip, uMode);
-  float alpha = mix(mEdge, mStrip, uMode) * uOpacity;
+
+  // Alpha is not constant across the ribbon. The sheath is half the weight of
+  // the body and the arrow heads carry a little extra, which is what gives the
+  // line a soft animated leading edge without a second draw call - and what
+  // keeps the whole thing sitting *under* the wake instead of punching through
+  // it in saturated blocks.
+  float lineAlpha = mEdge * (0.44 + 0.56 * mBody) * (0.86 + 0.30 * arrow * mBody);
+  float alpha = mix(lineAlpha, mStrip, uMode) * uOpacity;
 
   // Fade out well before the fog does. A 2.7 km ribbon drawn all the way to the
   // horizon would be a bright stripe laid over the whole sea; it has to hand
@@ -313,10 +358,17 @@ export const GATE_BANNER_VERT = /* glsl */ `
 in vec3 aTint;
 in vec2 aFlags;   // x = lit 0/1, y = style (0 = gate, 1 = start/finish)
 
+uniform float uTime;
+/** Cloth wobble: x = twist amplitude, y = waves along the span, z = rate. */
+uniform vec3  uWobble;
+
 out vec2  vUv;
 out vec3  vTint;
 out vec2  vFlags;
 out vec3  vViewNormal;
+/** Shading normal in *world* space: the geometric normal on the structural
+    faces, a bowed and slowly twisting cloth normal on the two long faces. */
+out vec3  vClothNormal;
 out float vViewDepth;
 
 void main() {
@@ -329,7 +381,33 @@ void main() {
   // thin), so this is not the inverse transpose. It does not need to be: every
   // face of the slab has an axis-aligned normal, and scaling an axis-aligned
   // vector by a diagonal matrix changes its length but not its direction.
-  vViewNormal = normalize(mat3(viewMatrix) * mat3(model) * normal);
+  vec3 worldNrm = normalize(mat3(model) * normal);
+  vViewNormal = normalize(mat3(viewMatrix) * worldNrm);
+
+  // --- the cloth read -------------------------------------------------------
+  // The span is a bowed ribbon of fabric, and a ribbon's whole legibility is
+  // that its surface turns: the light runs off the top edge and the underside
+  // falls into shadow. A slab's two long faces have one normal between them, so
+  // the shading normal is rebuilt here instead - bowed across the height, and
+  // twisted slowly along the length by two out-of-phase waves so the shading
+  // bands crawl along the banner the way cloth does in a breeze.
+  //
+  // Nothing here moves a vertex. The ink shell is a separate mesh drawn from the
+  // same instance matrix; displacing this surface and not that one would tear
+  // the outline off the banner. The wobble lives entirely in the normal, which
+  // is what the cel bands key off, so the silhouette stays exactly where the
+  // shell puts it.
+  vec3 axV = normalize(mat3(model)[1]);
+  vec3 axW = normalize(mat3(model)[2]);
+  float s = uv.x;
+  float twist = uWobble.x * (
+      sin(s * uWobble.y + uTime * uWobble.z) * 0.66 +
+      sin(s * uWobble.y * 1.73 - uTime * uWobble.z * 0.81) * 0.34);
+  float bow = (uv.y - 0.5) * 2.0;
+  // 1 on the two long faces, 0 on the hems and the ends.
+  float longFace = step(0.5, abs(normal.z));
+  vec3 cloth = normalize(axW * sign(normal.z + 1e-4) + axV * (bow * 0.66 + twist));
+  vClothNormal = normalize(mix(worldNrm, cloth, longFace));
 
   vUv = uv;
   vTint = aTint;
@@ -350,13 +428,15 @@ in vec2  vUv;
 in vec3  vTint;
 in vec2  vFlags;
 in vec3  vViewNormal;
+in vec3  vClothNormal;
 in float vViewDepth;
 
 uniform float uTime;
-uniform vec3  uFrame;   // the banner's structural rail
+uniform vec3  uFrame;   // the pylon clamps and the banner's hem
 uniform vec3  uInk;
-uniform vec3  uHot;     // arrow / checker highlight
-/** x = arrows per unit width, y = scroll rate, z = chevron sweep-back. */
+uniform vec3  uHot;     // mark / checker highlight
+uniform vec3  uSun;     // key light, world space
+/** x = marks along the span, y = drift rate, z = chevron sweep-back. */
 uniform vec3  uArrow;
 /** Checker cells across the start/finish banner: x along, y up. */
 uniform vec2  uCheck;
@@ -369,42 +449,95 @@ void main() {
   float lit = vFlags.x;
   float style = vFlags.y;
 
-  // Rails top and bottom, glowing field between. The rails are structure - they
-  // take an ink line from the Sobel pass - and the field is light, which does not.
-  float railT = wbCrisp(0.80, v, 0.25);
-  float railB = wbInside(0.20, v, 0.25);
-  float rail = max(railT, railB);
-  float lip = max(wbCrisp(0.955, v, 0.25), wbInside(0.045, v, 0.25));
+  // --- three cel bands off the cloth normal ---------------------------------
+  // This is the whole point of rebuilding the normal in the vertex shader. The
+  // banner is a curved surface a hundred and fifty feet wide; with one flat fill
+  // across it, it is a highway barrier. Two hard steps against the key light
+  // give it an upper face that catches the sun, a body, and an underside that
+  // falls into a cooler shadow - and because the normal twists slowly along the
+  // span, the boundaries between them travel, which is the cloth.
+  float ndl = dot(normalize(vClothNormal), uSun);
+  float bLit  = wbCrisp(0.34, ndl, 0.6);
+  float bMid  = wbCrisp(-0.04, ndl, 0.6);
 
-  // Arrows: a band across the banner, swept back at the edges into a chevron,
-  // running the way the boats go through the gate.
-  float phase = fract(u * uArrow.x - uTime * uArrow.y + abs(v - 0.5) * uArrow.z);
-  float arrow = wbInside(0.36, phase, 0.35);
+  // The tint arrives at full chroma so it can be read at a kilometre; on the
+  // surface it is deliberately held well off the channel ceiling, because a
+  // colour already at maximum has nowhere left to go and cannot carry a
+  // highlight. Every band below is a fraction of it.
+  vec3 shadeCol = vTint * 0.30 + uFrame * 0.20;
+  vec3 bodyCol  = vTint * 0.55;
+  vec3 litCol   = vTint * 0.76 + uHot * 0.06;
+
+  vec3 field = shadeCol;
+  field = mix(field, bodyCol, bMid);
+  field = mix(field, litCol, bLit);
+
+  // --- the course mark ------------------------------------------------------
+  // A doubled chevron pointing *down*, repeated along the span: "the line runs
+  // under here". The old pattern was a row of road-works arrows pointing across
+  // the frame, which made the largest object in the picture the strongest
+  // leading line in it, aimed at the edge of the screen. This one points at the
+  // water the boats are about to cross.
+  float cu = fract(u * uArrow.x - uTime * uArrow.y) - 0.5;
+  float cv = v - 0.5;
+  float ridge = abs(cu) * uArrow.z;
+  // The cell mask is what makes these *marks* rather than a pattern. Without
+  // it each V runs into its neighbours at the cell boundary and the whole span
+  // becomes one continuous sawtooth ribbon - a texture, not a row of signs.
+  float cell = wbInside(0.33, abs(cu), 0.3);
+  float markA = wbInside(0.080, abs(cv + 0.14 - ridge), 0.3);
+  float markB = wbInside(0.042, abs(cv - 0.10 - ridge), 0.3);
+  float mark = max(markA, markB) * cell;
 
   // The start/finish banner is a checker instead. Generated here, not sampled -
   // two floors and a mod, which is crisper than any texture at any distance.
   float chk = mod(floor(u * uCheck.x) + floor(v * uCheck.y), 2.0);
 
-  vec3 field = mix(vTint * 0.45, vTint, 1.0);
-  field = mix(field, uHot, arrow * 0.75);
-  vec3 chkField = mix(uInk, uHot, chk);
+  // The mark takes the same three bands as the field, one step brighter. Left
+  // at flat uHot it clipped to white across the whole span and turned the
+  // banner into two flat fills with a hard join.
+  vec3 markCol = uHot * (0.52 + 0.16 * bMid + 0.22 * bLit);
+  field = mix(field, markCol, mark);
+  vec3 chkField = mix(uInk, uHot * 0.80, chk);
   field = mix(field, chkField, style);
 
-  vec3 col = mix(field, uFrame, rail);
-  col = mix(col, uInk, lip);
+  // --- hem, and the hardware that holds it up -------------------------------
+  // One narrow hem, in a deep shade of the banner's own hue rather than in the
+  // near-black the rail used to be. The banner already carries an ink shell at
+  // the same weight as the boats'; a second dark band a fifth of the height
+  // thick inside it read as a doubled outline eight times too heavy.
+  float hem = max(wbCrisp(0.895, v, 0.25), wbInside(0.105, v, 0.25));
+  vec3 hemCol = vTint * 0.20 + uFrame * 0.42;
+
+  // Attachment at both masts: a clamp block over the last few percent of the
+  // span, with a bright lug and two grommets punched through the cloth just
+  // inboard of it. Small, but it is the difference between a banner that is
+  // fastened to the gate and one that simply stops.
+  float endU = min(u, 1.0 - u);
+  float clampBlk = wbInside(0.022, endU, 0.2);
+  float lug = clampBlk * wbCrisp(0.62, v, 0.3);
+  float grommet = wbInside(0.010, abs(endU - 0.040), 0.2)
+                * wbInside(0.13, abs(v - 0.5), 0.3);
+
+  vec3 col = mix(field, hemCol, hem);
+  col = mix(col, uFrame, clampBlk);
+  col = mix(col, uFrame * 0.6 + uHot * 0.28, lug);
+  col = mix(col, uInk, grommet);
 
   // Lit gates pulse. The rate is deliberately slow enough to read as a beacon
   // rather than as a flicker, and it only ever *adds* - a gate never goes dark.
+  // The idle term is small on purpose: the gate has to sit under the racers in
+  // the value hierarchy, and it was previously the brightest thing in frame.
   float pulse = 0.5 + 0.5 * sin(uTime * 3.1);
   float emissive = uEmissive.x + uEmissive.y * lit * (0.55 + 0.45 * pulse);
-  col += field * emissive * (1.0 - rail);
+  col += field * emissive * (1.0 - max(hem, clampBlk));
 
   float fog = wbFog(vViewDepth);
   col = mix(col, uFogColor, fog);
 
-  // Only the structure earns interior lines; the glowing field would just get
-  // scribbled on, and it fades out entirely into the haze.
-  float edgeMask = (0.15 + 0.55 * rail) * (1.0 - fog);
+  // Only the structure earns interior lines; the field would just get scribbled
+  // on, and it fades out entirely into the haze.
+  float edgeMask = (0.10 + 0.34 * hem + 0.40 * clampBlk) * (1.0 - fog);
 
   gColor = vec4(col, 1.0);
   wbWriteGBuffer(normalize(vViewNormal), vViewDepth, edgeMask);

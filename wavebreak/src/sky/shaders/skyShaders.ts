@@ -1,4 +1,4 @@
-import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE, DITHER } from '../../render/shaders/celChunks';
+import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE } from '../../render/shaders/celChunks';
 
 /**
  * All GLSL for everything above the waterline: the gradient dome (with the sun
@@ -49,7 +49,6 @@ precision highp float;
 ${GBUFFER_OUT}
 ${OCT_PACK}
 ${GBUFFER_WRITE}
-${DITHER}
 
 uniform vec3  uZenith;
 uniform vec3  uMid;
@@ -64,24 +63,51 @@ uniform float uTime;
 in vec3 vDir;
 
 // -- band structure -----------------------------------------------------------
-// BAND_TOP is measured in sin(elevation), not degrees: 0.42 is ~25 degrees.
-// With the 58-degree vertical FOV the camera runs at, that puts the flat blocks
-// in roughly the bottom half of the frame when looking at the horizon - which is
-// where a background painter puts them - and leaves the top of the frame a wash.
-const float BAND_TOP   = 0.42;
-// Five bands. Four reads as a poster, six starts to read as a bad gradient.
-const float BAND_COUNT = 5.0;
+// The sky is the largest surface in the frame, so it is the one that decides
+// whether the game reads as painted or as rendered. It is therefore quantised
+// EVERYWHERE - there is no smooth region left in it, not even at the zenith.
+//
+// The parameter is elevation *angle*, normalised so 1.0 is straight up, because
+// that is the axis a background painter stacks flats on. Band heights are
+// deliberately unequal: a narrow haze sliver on the waterline, then steps that
+// roughly double in height on the way up, ending in one huge zenith plate. That
+// progression is what makes a flat backdrop read as a dome - the compression
+// near the horizon *is* the perspective.
+//
+// Seven bands, six edges. Only five or six are ever in shot at once (the top of
+// a 72-degree frame aimed at the horizon reaches about 35 degrees).
+const float SKY_EDGE[6] = float[6](0.016, 0.048, 0.098, 0.175, 0.295, 0.500);
+// Per-edge waver amplitude: about a quarter of the narrower neighbouring band,
+// so an edge can never touch, cross or swallow its neighbour.
+const float SKY_WOB[6]  = float[6](0.0045, 0.0090, 0.0140, 0.0215, 0.0340, 0.0570);
+// Each band's fixed position on the horizon -> mid -> zenith ramp. These are the
+// chosen palette entries; nothing between them is ever displayed.
+const float SKY_TONE[7] = float[7](0.058, 0.157, 0.284, 0.444, 0.659, 0.962, 1.000);
+// How far each band is lifted toward the near-white haze colour. Only the two
+// lowest carry any, which is what turns the bottom of the sky into a fog wedge
+// that meets the fogged far water instead of stepping against it - and because
+// the lift is constant across a band, it adds no edge of its own.
+const float SKY_HAZE[7] = float[7](0.50, 0.21, 0.06, 0.000, 0.000, 0.000, 0.000);
+// And how far it is warmed toward the sun's own gold. Warmth belongs to the
+// bands, not to a compass sector: an azimuthal wash needs an edge somewhere, and
+// wherever that edge lands it is a vertical seam in a sky made of horizontals.
+// Because the whole band stack rises toward the sun (see 'lift' below), warm
+// bands sit visibly higher on the sun's side, which is the light cue - drawn
+// with the same steps as everything else instead of painted over them.
+const float SKY_WARM[7] = float[7](0.19, 0.09, 0.03, 0.000, 0.000, 0.000, 0.000);
 
 // -- sun geometry -------------------------------------------------------------
 // Angular radii in radians. The real sun is 0.0047 rad; every one of these is
 // deliberately far larger, because an accurate sun is a two-pixel dot and this
-// one has to carry the frame.
-const float SUN_CORE  = 0.0225;   // ~1.3 deg: hard white core
-const float SUN_RING1 = 0.0345;
-const float SUN_RING2 = 0.0520;
-const float SUN_HALO  = 0.1150;   // ~6.6 deg: the outermost, faintest step
+// one has to carry the frame. Five concentric hard discs - a drawn corona, not
+// a bloom: no term in here falls off with distance.
+const float SUN_CORE  = 0.0300;   // ~1.7 deg: flat white disc
+const float SUN_RING1 = 0.0430;
+const float SUN_RING2 = 0.0600;
+const float SUN_RING3 = 0.0820;
+const float SUN_HALO  = 0.1120;   // ~6.4 deg: outermost, palest step
 
-/** Horizon -> mid -> zenith, evaluated on an already-curved parameter. */
+/** Horizon -> mid -> zenith, evaluated at one of the seven band positions. */
 vec3 skyGradient(float t) {
   return t < 0.5 ? mix(uHorizon, uMid, t * 2.0)
                  : mix(uMid, uZenith, (t - 0.5) * 2.0);
@@ -91,91 +117,80 @@ void main() {
   vec3 dir = normalize(vDir);
   float e = dir.y;                                  // sin(elevation), -1..1
 
-  // pow < 1 stretches the low sky. Without it the five bands would be squashed
-  // into a few dozen pixels above the horizon and read as a moire, not as blocks.
-  float t = pow(clamp(e, 0.0, 1.0), 0.62);
+  // Elevation angle, normalised to 1.0 at the zenith. 2/PI = 0.6366198.
+  float a01 = asin(clamp(e, 0.0, 1.0)) * 0.6366198;
 
-  // --- quantise the low sky --------------------------------------------------
-  // 'zone' is 1 where the sky is flat blocks and 0 where it is a smooth wash.
-  // The crossover deliberately starts at 55% of the band region, so the bottom
-  // two or three bands are dead hard and the top one or two dissolve upward.
-  float zone = 1.0 - smoothstep(BAND_TOP * 0.55, BAND_TOP * 1.10, t);
-
-  // Band edges undulate slowly with azimuth. Amplitude is well under one band,
-  // so edges breathe without ever crossing each other or popping a band out of
-  // existence. Two incommensurate terms keep the motion from reading as a spin.
   float az = atan(dir.z, dir.x);
-  float wob = 0.20 * sin(az * 2.0 + uTime * 0.055)
-            + 0.12 * sin(az * 3.0 - uTime * 0.031);
 
-  float u  = clamp(t / BAND_TOP, 0.0, 1.0);
-  float uq = clamp((floor(u * BAND_COUNT + wob) + 0.5) / BAND_COUNT, 0.0, 1.0);
-  // Blending the *parameter* rather than the two colours is what makes the steps
-  // shrink smoothly as they climb instead of cross-fading into ghost bands.
-  float tt = mix(t, uq * BAND_TOP, zone);
-
-  vec3 col = skyGradient(tt);
-
-  // --- horizon haze ----------------------------------------------------------
-  // The scene fog carries the ocean to uHorizon by 1750 m, so the sea's far edge
-  // and the sky already meet at the identical value - there is no hard line to
-  // hide. What this band adds is the lift you get looking through a lot of moist
-  // air: narrow, centred on the horizon, and stepped so it matches the treatment
-  // above it rather than reading as a soft photographic glow.
-  float hazeE = abs(e + 0.004 * sin(az * 1.7 + uTime * 0.04));
-  float haze  = 1.0 - clamp(hazeE / 0.115, 0.0, 1.0);   // +-6.6 degrees
-  float hazeQ = floor(haze * 3.0 + 0.5) / 3.0;          // three hard steps
-
-  // --- azimuthal warmth ------------------------------------------------------
-  // Low sky on the sun's side of the compass warms toward the sun colour. Also
-  // stepped: a smooth azimuthal wash is the single fastest way to make a cel sky
-  // look like a render.
+  // --- light axis ------------------------------------------------------------
+  // One key direction, taken straight from SUN_DIR so the sky agrees with every
+  // cel material's terminator by construction. Rather than washing a colour
+  // across the sky (which is what makes a cel sky look rendered), the sun's side
+  // of the compass *raises the band edges*: the pale low bands stack higher
+  // toward the sun and the deep bands drop toward it. The steps stay flat and
+  // the light direction is legible even with the disc out of frame.
+  vec3  sunDir   = normalize(uSunDir);
   vec3  sunAzDir = normalize(vec3(uSunDir.x, 0.0, uSunDir.z));
-  vec3  viewAz   = normalize(vec3(dir.x, 0.0, dir.z) + 1e-5);
-  float sunSide  = max(dot(viewAz, sunAzDir), 0.0);
-  float warm     = pow(sunSide, 3.0) * (1.0 - smoothstep(0.0, 0.55, t));
-  float warmQ    = floor(warm * 3.0) / 3.0;
+  vec3  viewAz   = normalize(vec3(dir.x, 0.0, dir.z) + vec3(1e-5, 0.0, 0.0));
+  float axis     = dot(viewAz, sunAzDir);           // +1 into the sun, -1 away
+  float sunSide  = max(axis, 0.0);
+  float lift     = 0.052 * pow(sunSide, 1.5);
+  // ...and the far side of the compass drops them, so the deep cobalt reaches
+  // further down there. Same device, opposite sign: the sky is pale and warm
+  // where the light comes from and cold and heavy where it does not.
+  float drop     = 0.026 * pow(max(-axis, 0.0), 1.5);
 
-  col = mix(col, uHazeLift, hazeQ * (0.20 + 0.22 * sunSide));
-  col = mix(col, uSunGlow, warmQ * 0.16);
+  float p = a01 - lift + drop;
 
-  // A broad stepped bloom around the sun itself. This matters more than it looks:
-  // SUN_DIR sits at 43 degrees elevation and the chase camera's frame top reaches
-  // about 20, so the disc is usually just out of shot. This lobe (half-strength
-  // at ~27 degrees off-axis) is what puts the sun's presence *in* the frame. Four
-  // hard steps, because a smooth radial falloff here is a lens, not a painting.
-  float bloom  = pow(max(dot(dir, normalize(uSunDir)), 0.0), 6.0);
-  float bloomQ = floor(bloom * 4.0) / 4.0;
-  col = mix(col, uSunGlow, bloomQ * 0.28);
+  // --- pick a band -----------------------------------------------------------
+  // Edges waver slowly with azimuth on two incommensurate terms, so they read as
+  // brushed flats rather than as a ruler, and never resolve into a spin.
+  float band = 0.0;
+  for (int i = 0; i < 6; i++) {
+    float fi = float(i);
+    float wob = 0.62 * sin(az * 2.0 + uTime * 0.047 + fi * 1.93)
+              + 0.38 * sin(az * 3.0 - uTime * 0.031 + fi * 0.77);
+    band += step(SKY_EDGE[i] + SKY_WOB[i] * wob, p);
+  }
+  int bi = int(clamp(band, 0.0, 6.0));
+
+  vec3 col = skyGradient(SKY_TONE[bi]);
+  col = mix(col, uHazeLift, SKY_HAZE[bi]);
+  // Gold only where the band under it is already pale: over mid-blue it would
+  // make mauve, which is the exact mud this replaced.
+  col = mix(col, uSunGlow, SKY_WARM[bi]);
 
   // Below the horizon the ocean covers everything - except at the very edge of
   // the water mesh, where a gap would otherwise flash bright sky. Sinking to a
-  // sea-toned haze makes any such gap invisible.
-  col = mix(col, uUnderHaze, smoothstep(0.0, 0.16, -e));
+  // sea-toned haze makes any such gap invisible. Stepped, like everything else.
+  float under = clamp(-e / 0.14, 0.0, 1.0);
+  col = mix(col, uUnderHaze, floor(under * 3.0 + 0.5) / 3.0);
 
   // --- the sun ---------------------------------------------------------------
   // Concentric hard discs, largest and faintest first. fwidth() gives each edge
   // exactly one pixel of anti-aliasing - enough to stop the circle stair-stepping,
   // not enough to read as a falloff. (fwidth of acos blows up at the very centre,
   // but that point is buried inside the core disc, so it never shows.)
-  float ang = acos(clamp(dot(dir, normalize(uSunDir)), -1.0, 1.0));
-  float w   = fwidth(ang) * 0.9 + 1e-4;
-  // The halo breathes very slowly. It is the only part of the sun that moves.
-  float haloR = SUN_HALO * (1.0 + 0.05 * sin(uTime * 0.37));
+  //
+  // The two outer rings lift toward the pale haze colour rather than toward gold:
+  // over mid-blue sky a gold ring of any width turns violet, which is exactly the
+  // muddy corona this replaced.
+  float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
+  float w   = fwidth(ang) * 0.8 + 1e-4;
+  // The halo breathes - on threes, quantised, so it animates like a drawing.
+  float haloR = SUN_HALO * (1.0 + 0.045 * floor(sin(uTime * 0.41) * 2.0 + 0.5) * 0.5);
 
   float halo  = 1.0 - smoothstep(haloR      - w, haloR      + w, ang);
+  float ring3 = 1.0 - smoothstep(SUN_RING3  - w, SUN_RING3  + w, ang);
   float ring2 = 1.0 - smoothstep(SUN_RING2  - w, SUN_RING2  + w, ang);
   float ring1 = 1.0 - smoothstep(SUN_RING1  - w, SUN_RING1  + w, ang);
   float core  = 1.0 - smoothstep(SUN_CORE   - w, SUN_CORE   + w, ang);
 
-  col = mix(col, uSunGlow, halo  * 0.16);
-  col = mix(col, uSunGlow, ring2 * 0.34);
-  col = mix(col, uSunGlow, ring1 * 0.70);
-  col = mix(col, uSunCore, core);
-
-  // Dither only where the sky is a genuine gradient. Inside a flat band there is
-  // nothing to break up, and dithering a flat block just adds noise to it.
-  col += wbDither(gl_FragCoord.xy) * (1.0 - zone) * 1.6;
+  col = mix(col, uHazeLift, halo  * 0.22);
+  col = mix(col, uHazeLift, ring3 * 0.46);
+  col = mix(col, uSunGlow,  ring2 * 0.60);
+  col = mix(col, uSunGlow,  ring1 * 0.88);
+  col = mix(col, uSunCore,  core);
 
   gColor = vec4(col, 1.0);
   // depth = uCameraFar -> 1.0 after the divide, so the Sobel pass sees the sky as
@@ -255,13 +270,17 @@ void main() {
   // sky's treatment. Low ones sink into the horizon band; high ones stay crisp.
   vec3  toCam = cameraPosition - centre;
   float elev  = (centre.y - cameraPosition.y) / max(length(toCam), 1.0);
-  // Capped at 0.62: a cloud sitting on the haze band should half-dissolve into
-  // it, not disappear. Losing them entirely leaves a bald strip above the sea.
-  vHaze = (1.0 - smoothstep(0.03, 0.20, elev)) * 0.62;
+  // Capped at 0.52: a cloud sitting on the haze band should half-dissolve into
+  // it, not disappear. Losing them entirely leaves a bald strip above the sea,
+  // and the low shell exists precisely to fill that strip.
+  vHaze = (1.0 - smoothstep(0.006, 0.150, elev)) * 0.52;
 
   // Backlit clouds get the hot rim. dot(-fwd, sunAzimuth) is 1 when the cloud
-  // sits between the camera and the sun.
-  vRim  = 0.55 + 0.45 * max(dot(-fwd, normalize(vec3(uSunDir.x, 0.0, uSunDir.z))), 0.0);
+  // sits between the camera and the sun. Two steps, not a ramp: a cloud is
+  // either taking the light or it is not, and the rim is at three quarters
+  // strength even facing away so the ribbon never dulls into khaki.
+  float faceSun = max(dot(-fwd, normalize(vec3(uSunDir.x, 0.0, uSunDir.z))), 0.0);
+  vRim  = 0.74 + 0.26 * step(0.30, faceSun);
   vTint = aStyle.z;
 }
 `;
@@ -273,14 +292,18 @@ ${OCT_PACK}
 ${GBUFFER_WRITE}
 
 // uAtlas is a *mask*, not a picture: R marks the lit body, G the rim ribbon,
-// B the shaded underside, A the silhouette. Every colour comes from the palette
-// uniforms below, so the clouds re-tint for free if the palette moves.
+// B the shaded underside, A the silhouette, and rgb = 0 with a = 1 marks the ink
+// contour. Every colour comes from the palette uniforms below, so the clouds
+// re-tint for free if the palette moves.
 uniform sampler2D uAtlas;
 uniform vec3  uLit;
 uniform vec3  uShade;
 uniform vec3  uRimColor;
+uniform vec3  uInk;
 uniform vec3  uHaze;
 uniform float uOpacity;
+/** Atlas width in texels, for the ink line's minification fade. */
+uniform float uAtlasTexels;
 
 in vec2  vUv;
 in vec3  vViewNormal;
@@ -306,7 +329,28 @@ void main() {
 
   // Per-instance tint plus elevation haze, both pulling toward the horizon
   // colour so the cloud band dissolves into the atmosphere at its lower edge.
-  col = mix(col, uHaze, clamp(vTint * 0.16 + vHaze, 0.0, 1.0));
+  // Quantised to three steps: a continuous per-instance tint is a per-instance
+  // gradient, which is the same defect as a smooth sky, just spread over sixty
+  // draws instead of one.
+  float hz = clamp(vTint * 0.14 + vHaze, 0.0, 1.0);
+  hz = floor(hz * 3.0 + 0.5) / 3.0;
+  col = mix(col, uHaze, hz);
+
+  // Ink contour. The atlas carries a dilated ring of rgb = 0 around every
+  // silhouette, so the line is a constant width in atlas texels and follows the
+  // shape exactly - the same treatment the hulls get from the inverted hull, and
+  // the reason the clouds no longer read as being from a different game. It
+  // hazes at a third of the rate of the tones, so distant clouds keep their line.
+  //
+  // The fade matters. Once a card is minified past about two texels per pixel the
+  // mip chain averages the ring into the tones, the channel sum for a thin cloud
+  // drops under the threshold across its whole body, and the cloud renders as one
+  // solid dark smear. Retiring the line before that happens costs a small cloud
+  // its outline and saves it its shape.
+  float texels = max(length(dFdx(vUv)), length(dFdy(vUv))) * uAtlasTexels;
+  float inkFade = 1.0 - smoothstep(1.5, 3.0, texels);
+  float ink = step(m.r + m.g + m.b, 0.38) * inkFade;
+  col = mix(col, mix(uInk, uHaze, hz * 0.34), ink);
 
   gColor = vec4(col, a);
   // edgeMask = 0. Two things follow: the Sobel pass draws no interior line here

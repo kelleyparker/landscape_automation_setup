@@ -98,19 +98,93 @@ const CHOP_FADE_END = 430;
 const BAND_FRACTION = 0.6;
 
 /**
- * Band edges in 0..1 height space, deliberately uneven. Against the height
- * distribution above these give roughly 25% deep / 32% mid / 27% shallow /
- * 16% crest - the crest colour has to stay rare or it stops reading as a crest.
+ * Band edges in 0..1 height space, deliberately uneven. h01 is roughly normal
+ * about 0.5 with a standard deviation near 0.31, so against that distribution
+ * these five bands land at about 12% abyss / 20% deep / 26% mid / 25% shallow /
+ * 17% crest. Five and not four: with four, the sea stepped from mid-blue
+ * straight to foam white with no shoulder, and the whole trough interior was one
+ * unbroken navy fill over a fifth of the frame. The abyss band gives the deep
+ * water a deep/mid read of its own and the crest band gives the ramp a
+ * shoulder under the foam.
  */
-const BAND_EDGES = new THREE.Vector3(0.26, 0.54, 0.80);
+const BAND_EDGE_0 = 0.13;
+const BAND_EDGES = new THREE.Vector3(0.35, 0.60, 0.80);
 
-/** Foam tile sizes in metres. Two scales, mutually non-harmonic, so no beat. */
+/** Foam tile sizes in metres. Three scales, mutually non-harmonic, so no beat. */
 const FOAM_TILE_A = 12.0;
 const FOAM_TILE_B = 41.0;
+/** The carve tile: small, so it punches holes rather than moving the silhouette. */
+const FOAM_TILE_C = 3.7;
 /** Noise tile for the band-edge wobble. Features from ~3 m up. */
 const NOISE_TILE = 14.0;
 /** Sparkle tile. Sparse stars, so the repeat is not readable. */
-const SPARKLE_TILE = 13.0;
+const SPARKLE_TILE = 26.0;
+/**
+ * Facet-jitter tile for the sparkle's normal. Deliberately *coarser* than the
+ * star tile: the facet decides whether a star lights, so if it varies faster
+ * than the star is wide it chews each star into a cluster of speckle, which is
+ * the very crawl the sparkle pass is meant to replace. Coarse facet, fine star.
+ */
+const SPARKLE_FACET_TILE = 7.0;
+
+/**
+ * The single distance ramp every drawn mark on the water fades along, in metres
+ * of view depth. Deliberately enormous: the failure this replaces was a set of
+ * narrow fades that all landed within a few screen rows of each other, which read
+ * as a hard LOD ring with a band of per-pixel speckle just past it. Spread over
+ * 600 m no single row carries a visible share of the transition.
+ */
+const DETAIL_FADE_START = 55;
+const DETAIL_FADE_END = 660;
+
+/**
+ * The water's own aerial perspective, which is *not* the scene fog range. Scene
+ * fog starts at 260 m and ends at 1750 m, which for a camera two metres off the
+ * water leaves the entire readable sea - everything inside a few hundred metres -
+ * at full near-field chroma and puts the whole ramp into the last handful of
+ * screen rows. Water needs haze far earlier than the course furniture does, and
+ * the curve is under 1 so most of it is spent in the first third of the range.
+ */
+const HAZE_NEAR = 90;
+const HAZE_FAR = 1400;
+const HAZE_CURVE = 0.58;
+/** Where the three painted haze layers cut in, in haze-ramp space. */
+const HAZE_EDGES = new THREE.Vector3(0.30, 0.58, 0.84);
+
+// -------------------------------------------------------- derived colours ----
+
+/**
+ * Colours the palette does not name but that are pure functions of ones it does.
+ * Deriving rather than adding entries keeps the hue relationships locked to the
+ * palette: retint `waterDeep` and every one of these follows.
+ *
+ * All of them are built by mixing palette entries, never by rotating hue in HSL.
+ * That is not a style preference: these colours are already linear, and
+ * `waterDeep` sits at linear hue 0.636 - within a hair of pure blue - so a shift
+ * of even +0.02 drives its green channel to exactly zero and the band comes out
+ * of the frame as a near-black hole rather than as a deep blue.
+ */
+
+/**
+ * The two blues in the deep water used to sit twenty units apart in green and
+ * blue and nothing else, so a quarter of the frame carried one boundary that was
+ * barely legible. The abyss band is pulled toward the palette's violet as well as
+ * down in value, so the pair separates by hue and not by value alone.
+ */
+const BAND_ABYSS = PALETTE.waterDeep.clone().lerp(PALETTE.racerP3, 0.20).multiplyScalar(0.74);
+const BAND_DEEP = PALETTE.waterDeep.clone();
+/** Subsurface note in the trough floor: the shallow cyan pulled into the navy. */
+const DEEP_TINT = PALETTE.waterDeep.clone().lerp(PALETTE.waterShallow, 0.34);
+/**
+ * The hot inner lip of a backlit crest. Pulling the jade a third of the way to
+ * the sun's glow is the only warm note anywhere in the water, and the whole
+ * palette was on one blue-cyan axis without it.
+ */
+const TRANSLUCENT_HOT = PALETTE.waterTranslucent.clone().lerp(PALETTE.sunGlow, 0.34);
+/** Glint colour: foam with a warm core, so the sun track is not just white. */
+const SPARKLE_COLOR = PALETTE.foam.clone().lerp(PALETTE.sunCore, 0.55);
+/** Ink for the foam contour. The scene ink, lifted so it reads as a line not a hole. */
+const FOAM_INK = PALETTE.inkSoft.clone().lerp(PALETTE.waterDeep, 0.45);
 
 // --------------------------------------------------------------- scratch -----
 
@@ -250,13 +324,24 @@ export class Ocean {
       uChopFade: { value: new THREE.Vector2(CHOP_FADE_START, CHOP_FADE_END) },
 
       // --- bands ------------------------------------------------------------
-      uBandDeep: { value: PALETTE.waterDeep.clone() },
+      uBandAbyss: { value: BAND_ABYSS.clone() },
+      uBandDeep: { value: BAND_DEEP.clone() },
       uBandMid: { value: PALETTE.waterMid.clone() },
       uBandShallow: { value: PALETTE.waterShallow.clone() },
       uBandCrest: { value: PALETTE.waterCrest.clone() },
+      uBandEdge0: { value: BAND_EDGE_0 },
       uBandEdges: { value: BAND_EDGES.clone() },
       uBandFraction: { value: BAND_FRACTION },
-      uBandJitter: { value: 0.08 },
+      uBandJitter: { value: 0.09 },
+
+      uDeepTint: { value: DEEP_TINT.clone() },
+      // The lower fifth of the height range, and only where it is turned up at
+      // the sun - so it lands on trough floors and not on the faces beside them.
+      uDeepTintGate: { value: new THREE.Vector2(0.05, 0.34) },
+      uDeepTintCut: { value: 0.40 },
+      uDeepTintStrength: { value: 0.60 },
+
+      uDetailFade: { value: new THREE.Vector2(DETAIL_FADE_START, DETAIL_FADE_END) },
 
       // --- sky response -----------------------------------------------------
       uSkyNear: { value: PALETTE.skyMid.clone() },
@@ -267,9 +352,23 @@ export class Ocean {
 
       // --- backlit crest ----------------------------------------------------
       uTranslucent: { value: PALETTE.waterTranslucent.clone() },
-      uTransCut: { value: 0.33 },
-      uTransStrength: { value: 0.92 },
-      uTransFade: { value: new THREE.Vector2(120, 460) },
+      uTranslucentHot: { value: TRANSLUCENT_HOT.clone() },
+      // Flat water sits at ndl 0.68 under this sun, so the window opens just
+      // above that: only a face actively tilted into the sun clears it, which is
+      // exactly the sun-facing lip of a crest and not the shadow-side face.
+      uTransFacing: { value: new THREE.Vector2(0.70, 0.90) },
+      uTransThin: { value: new THREE.Vector2(0.52, 0.80) },
+      uTransCut: { value: new THREE.Vector2(0.27, 0.45) },
+      uTransStrength: { value: new THREE.Vector2(0.95, 0.85) },
+      uTransFade: { value: new THREE.Vector2(160, 620) },
+
+      // --- crest strokes ----------------------------------------------------
+      uStrokeColor: { value: PALETTE.waterCrest.clone() },
+      uStrokeGain: { value: 1.55 },
+      // Below the foam bar, so the strokes form a shoulder around every whitecap
+      // and go on appearing on crests that never break at all.
+      uStrokeCut: { value: 1.62 },
+      uStrokeStrength: { value: 0.82 },
 
       // --- foam -------------------------------------------------------------
       uFoamTex: { value: TEX.foam },
@@ -279,6 +378,8 @@ export class Ocean {
       uFoamScrollB: { value: new THREE.Vector2() },
       uFoamScaleA: { value: 1 / FOAM_TILE_A },
       uFoamScaleB: { value: 1 / FOAM_TILE_B },
+      uFoamScaleC: { value: 1 / FOAM_TILE_C },
+      uFoamCarve: { value: 0.44 },
       // Measured over 200k samples of the shipped wave set the Jacobian runs
       // 0.82 .. 1.19, median 1.00, 5th percentile 0.90. Foam therefore starts
       // just under the median and saturates at that 5th percentile, so the
@@ -286,23 +387,42 @@ export class Ocean {
       uFoamJac: { value: new THREE.Vector2(0.90, 1.005) },
       uFoamHeightGate: { value: new THREE.Vector2(0.50, 0.74) },
       uFoamGain: { value: 1.6 },
-      uFoamCut: { value: new THREE.Vector2(1.90, 1.46) },
-      uFoamCutJitter: { value: 0.40 },
+      // x = near, y = far. The far bar is now *higher* than the near one: past
+      // the LOD ring the old lower bar exploded the foam into flat white plates
+      // and then into horizon confetti. Fewer marks with distance, not more.
+      uFoamCut: { value: new THREE.Vector2(2.16, 2.62) },
+      uFoamCutJitter: { value: 0.34 },
       uFoamStrength: { value: 1.0 },
       // Every patch keeps a 0.07 rim of foamShade; the side facing away from the
       // sun grows to 0.31, which is what stops the whitecaps reading as stickers.
       uFoamRim: { value: new THREE.Vector2(0.07, 0.24) },
+      // Roughly three pixels of guaranteed mark width at 1440p.
+      uFoamWidthClamp: { value: 0.13 },
+      uFoamInk: { value: FOAM_INK.clone() },
+      uFoamInkWidth: { value: 0.075 },
+      uFoamInkStrength: { value: 0.62 },
 
       // --- sparkle ----------------------------------------------------------
       uSparkleTex: { value: TEX.sparkle },
       uNoiseTex: { value: TEX.noise },
       uNoiseScale: { value: 1 / NOISE_TILE },
       uSparkleScale: { value: 1 / SPARKLE_TILE },
-      uSparkleLobe: { value: 10 },
-      uSparkleCut: { value: 0.60 },
+      uSparkleColor: { value: SPARKLE_COLOR.clone() },
+      uSparkleFacetScale: { value: 1 / SPARKLE_FACET_TILE },
+      uSparkleRough: { value: 0.85 },
+      // A hard window on the facet's alignment with the sun, not a power lobe.
+      // Flat water under this sun lands near 0.45 with the camera low, so the
+      // window straddles it: the jittered facets fall on either side of the edge
+      // and the field breaks into discrete on/off stars.
+      uSparkleFacetEdges: { value: new THREE.Vector2(0.40, 0.56) },
+      // 14 m of track at the camera, opening out by 0.22 m per metre of range -
+      // the classic wedge of glitter running back to the sun.
+      uSparkleTrack: { value: new THREE.Vector2(14, 0.22) },
+      uSparkleWidthClamp: { value: 0.22 },
+      uSparkleCut: { value: 0.32 },
       uSparkleRate: { value: 2.4 },
-      uSparkleStrength: { value: 1.25 },
-      uSparkleFade: { value: new THREE.Vector2(90, 340) },
+      uSparkleStrength: { value: 1.0 },
+      uSparkleFade: { value: new THREE.Vector2(150, 520) },
 
       // --- hull interaction -------------------------------------------------
       uInteractors: { value: this.interactors },
@@ -311,8 +431,13 @@ export class Ocean {
       uWakeFoam: { value: 0.80 },
 
       // --- atmosphere / g-buffer --------------------------------------------
+      uHazeA: { value: PALETTE.waterMid.clone() },
+      uHazeB: { value: PALETTE.waterMid.clone() },
       uFogColor: { value: PALETTE.skyHorizon.clone() },
-      uFogRange: { value: new THREE.Vector2(260, 1750) },
+      uHazeEdges: { value: HAZE_EDGES.clone() },
+      uHazeJitter: { value: 0.14 },
+      uFogCurve: { value: HAZE_CURVE },
+      uFogRange: { value: new THREE.Vector2(HAZE_NEAR, HAZE_FAR) },
       uEdgeMask: { value: new THREE.Vector2(0.12, 0.2) },
     };
 
@@ -391,13 +516,36 @@ export class Ocean {
     out.set((dir.x * speed * elapsed) % tile, (dir.y * speed * elapsed) % tile);
   }
 
-  /** Mirrors `scene.fog` so the sea and the sky arrive at the same horizon value. */
+  /**
+   * Builds the water's haze ladder from the sky's *actual* horizon colour, so
+   * the two meet on the same hue instead of the sea arriving at a value it
+   * chose for itself.
+   *
+   * Only the colour is taken. The range deliberately is not: scene fog is tuned
+   * for course furniture kilometres out, and reusing it left the sea at full
+   * near-field chroma right up to the cut line. The water's own ramp is far
+   * tighter (see HAZE_NEAR / HAZE_FAR).
+   *
+   * The last water tone stops 12% short of the sky's value. That gap is the
+   * whole horizon: without it a pale foam band arriving at the waterline matches
+   * the sky exactly and the line disappears in patches while staying razor-sharp
+   * elsewhere, which reads worse than either extreme.
+   */
   private syncFog(): void {
     const fog = this.scene.fog;
-    if (fog instanceof THREE.Fog) {
-      (this.uniforms.uFogColor!.value as THREE.Color).copy(fog.color);
-      (this.uniforms.uFogRange!.value as THREE.Vector2).set(fog.near, fog.far);
-    }
+    if (!(fog instanceof THREE.Fog)) return;
+    const skyH = fog.color;
+    (this.uniforms.uFogColor!.value as THREE.Color)
+      .copy(skyH)
+      .lerp(PALETTE.waterShallow, 0.16)
+      .multiplyScalar(0.88);
+    // Two intermediate layers: chroma leaves before value does.
+    (this.uniforms.uHazeA!.value as THREE.Color)
+      .copy(PALETTE.waterMid)
+      .lerp(skyH, 0.40);
+    (this.uniforms.uHazeB!.value as THREE.Color)
+      .copy(PALETTE.waterMid)
+      .lerp(skyH, 0.74);
   }
 
   /**

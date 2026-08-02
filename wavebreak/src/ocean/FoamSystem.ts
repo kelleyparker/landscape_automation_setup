@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { PALETTE } from '../core/Palette';
-import { TEX } from '../core/Textures';
+import { PALETTE, SUN_DIR } from '../core/Palette';
 import { rng, Rng } from '../core/Rng';
 import { sampleSurface, type SurfaceSample } from './GerstnerCPU';
 import { WAKE_VERT, WAKE_FRAG, SPRAY_VERT, SPRAY_FRAG } from './shaders/foamShaders';
@@ -14,9 +13,10 @@ import { WAKE_VERT, WAKE_FRAG, SPRAY_VERT, SPRAY_FRAG } from './shaders/foamShad
  *  1. **Wake ribbons** - one per racer, a rolling history of spine points laid
  *     down behind the hull at a fixed *spatial* interval (not a fixed frame
  *     interval, or the trail would change shape with the frame rate). The
- *     ribbon spreads from the boat's beam to four times it, scrolls its foam
- *     texture backward so the water reads as moving through the foam, and
- *     dissipates by eroding rather than by dimming.
+ *     ribbon spreads from the boat's beam to five times it, masks itself with an
+ *     analytic blob field keyed off absolute world metres, and dissipates by
+ *     eroding - hollowing out along its centreline into two Kelvin arms of
+ *     broken islands - before it fades.
  *
  *     Every spine point is re-sampled against the ocean surface every frame.
  *     This is the expensive part and it is not optional: the swell here reaches
@@ -36,8 +36,9 @@ import { WAKE_VERT, WAKE_FRAG, SPRAY_VERT, SPRAY_FRAG } from './shaders/foamShad
  *
  *  2. **Spray particles** - one shared pool for all four boats, ballistic with
  *     gravity and drag, dying on contact with the water with a brief flattening
- *     splat. Hard-edged three-lobe blobs, not soft sprites: fading is by
- *     shrinking and by stepping down through three flat alpha plateaus.
+ *     splat. Drawn teardrops aimed down their own velocity, not soft sprites:
+ *     fading is by shrinking and by stepping down through three flat alpha
+ *     plateaus, and the palette is foam white to crest cyan and nothing else.
  *
  * Everything is preallocated. `update()` performs no allocation, geometry is
  * never rebuilt, and the whole system is four ribbon draws plus one instanced
@@ -74,8 +75,15 @@ const WAKE_MAX_INSERTS = 3;
 const WAKE_TURN_STEP = 0.10;
 /** Seconds a spine point survives. Inside the 4-6 s the look calls for. */
 const WAKE_LIFE = 5.0;
-/** Half-width multiplier at end of life. A wake opens fast, then keeps opening slowly. */
-const WAKE_SPREAD = 4.0;
+/**
+ * Half-width multiplier at end of life. A wake opens hard in its first second,
+ * then keeps opening slowly - roughly 1.6x in the first second and 5.4x by the
+ * time the tail has eroded away, which is the divergent V a hull actually
+ * leaves. The shader's centreline erosion works with this: the band widens
+ * while its middle hollows out, so the far end is two arms of broken islands
+ * rather than a stripe.
+ */
+const WAKE_SPREAD = 5.4;
 /**
  * Lift above the sampled surface, in metres. Together with the polygon offset
  * this keeps the ribbon clear of the ocean mesh without reading as a hovering
@@ -84,26 +92,28 @@ const WAKE_SPREAD = 4.0;
 const WAKE_LIFT = 0.06;
 
 /**
- * Metres of ribbon per tile of the foam alphabet: across, then along. The
- * alphabet's blobs are 22-68 px in a 512 px tile, so this puts foam clumps at
- * 0.14-0.43 m across and 0.20-0.62 m along - slightly stretched in the
- * direction of travel, which is what smeared foam actually does.
+ * Foam drift, in periods/second, for the two octaves of the analytic blob field.
+ *
+ * These are deliberately slow. The mask is keyed off absolute world metres -
+ * wake foam is left behind *in the water* and the boat drives away from it -
+ * so this is not the foam moving past the camera, it is the slow boil of the
+ * whitewater itself. Anything faster and the shapes crawl.
+ *
+ * The field is periodic on the shader's NOISE_PERIOD lattice, so the offsets
+ * wrap at 1.0 with no discontinuity at all.
  */
-const WAKE_TILE_U = 3.2;
-const WAKE_TILE_V = 4.6;
-
-/** Foam drift in tiles/second for the two texture layers. */
-const WAKE_SCROLL_A = 0.30;
-const WAKE_SCROLL_B = 0.55;
+const WAKE_SCROLL_A = 0.012;
+const WAKE_SCROLL_B = 0.021;
 
 /**
  * Arc length is monotonic and unbounded, so it is rebased once it passes this.
- * The value is an exact multiple of WAKE_TILE_V, which means the shader's `v`
- * coordinate jumps by a whole number of tiles and - with RepeatWrapping and
- * whole-number layer multipliers - samples identically across the rebase. The
- * bound also keeps float32 arc length precise to a quarter of a millimetre.
+ * It now only drives the cross-wake arc pattern rather than a texture lookup,
+ * and the rebase is an exact whole number of arc periods (2*pi / 1.35 m, the
+ * shader's arc frequency), so the pattern is continuous across the shift. The
+ * bound keeps float32 arc length precise to a quarter of a millimetre.
  */
-const WAKE_REBASE_DIST = WAKE_TILE_V * 512;
+const WAKE_ARC_PERIOD = (Math.PI * 2) / 1.35;
+const WAKE_REBASE_DIST = WAKE_ARC_PERIOD * 512;
 
 /** How long after the last emit a boat keeps driving an ocean interactor ring. */
 const INTERACTOR_HOLD = 0.35;
@@ -113,16 +123,34 @@ const SPRAY_POOL = 600;
 const SPRAY_GRAVITY = -19.0;
 /** Exponential velocity decay per second. */
 const SPRAY_DRAG = 1.15;
-/** Seconds the flattened splat lingers after the droplet hits the water. */
-const SPRAY_SPLAT_LIFE = 0.22;
+/**
+ * Seconds the flattened splat lingers after the droplet hits the water.
+ *
+ * Short on purpose. Spray reads as spray because it is *leaving* an impact; a
+ * droplet that sits flat on the surface for a fifth of a second reads as debris
+ * floating on the water, and at any given moment most of the pool was in that
+ * state. An eighth of a second is enough to register the mark being made.
+ */
+const SPRAY_SPLAT_LIFE = 0.12;
 /** Splat sits this far above the surface so it never z-fights the ocean. */
 const SPRAY_SPLAT_LIFT = 0.045;
 /** Particles requested per unit of `amount` passed to emitSpray. */
-const SPRAY_PER_AMOUNT = 12;
+const SPRAY_PER_AMOUNT = 8;
 /** Hard cap on one burst, so a bad caller cannot drain the pool in a frame. */
-const SPRAY_MAX_BURST = 40;
+const SPRAY_MAX_BURST = 26;
 /** Half-angle of the emission cone, as a lateral fraction of the supplied dir. */
 const SPRAY_CONE = 0.42;
+/**
+ * Metres the spawn point is pushed along the launch direction, away from the
+ * emitter.
+ *
+ * Droplets used to be born inside the hull that threw them: with depth testing
+ * on and the pool spread over a 44 cm cube centred on the emit point, roughly
+ * half of every burst spawned in front of the deck and covered it. Launching
+ * from clear of the hull and shrinking the droplets (below) means spray now
+ * breaks *against* the hull sides instead of over the rider.
+ */
+const SPRAY_SPAWN_PUSH = 0.34;
 
 /**
  * Water-height cache policy for airborne droplets.
@@ -162,6 +190,41 @@ const _box = new THREE.Box3();
 const _white = new THREE.Color(1, 1, 1);
 const _tint = new THREE.Color();
 
+/**
+ * The contour tone for every drawn foam silhouette, and the shadow floor for a
+ * droplet's rim.
+ *
+ * Explicitly *not* PALETTE.ink. Foam is a saturated white mass covering a large
+ * part of the frame, and a true ink contour inside it punches holes that read as
+ * missing geometry rather than as drawing. This is the deep-water blue lifted a
+ * quarter of the way toward the foam shadow: a full step darker than anything
+ * else in the ribbon, unmistakably a drawn line, and nowhere near zero luma.
+ * Derived from the palette, not authored - no literal is introduced here.
+ */
+const FOAM_EDGE = PALETTE.waterDeep.clone().lerp(PALETTE.foamShade, 0.25);
+
+/**
+ * How far a droplet's tint may travel from foam white toward crest cyan.
+ *
+ * Spray used to be tinted 32% toward the emitting racer's body colour, which
+ * put coral, violet, tangerine and acid green into the whitewater - the salmon,
+ * mauve-grey and mint shards reported across every frame. Whitewater is white;
+ * the only variation it is allowed is a cool one, so the racer colour is now
+ * ignored entirely and the droplet varies along foam-to-crest instead.
+ */
+const SPRAY_TINT_COOL = 0.34;
+
+/**
+ * The multiplier that carries foam white to crest cyan, so `_tint` can lerp
+ * between identity and this and stay inside the palette by construction rather
+ * than by a colour picked here.
+ */
+const SPRAY_COOL_MUL = new THREE.Color(
+  PALETTE.waterCrest.r / Math.max(1e-3, PALETTE.foam.r),
+  PALETTE.waterCrest.g / Math.max(1e-3, PALETTE.foam.g),
+  PALETTE.waterCrest.b / Math.max(1e-3, PALETTE.foam.b),
+);
+
 /** Shortest signed angular difference, -pi..pi. */
 function angleDelta(a: number, b: number): number {
   let d = (b - a) % (Math.PI * 2);
@@ -173,42 +236,59 @@ function angleDelta(a: number, b: number): number {
 // ------------------------------------------------------------ spray blob -----
 
 /**
- * The droplet shape: a three-lobe blob with a faceted silhouette, built as three
- * concentric rings so the shader's tone steps land exactly on triangle edges.
+ * The droplet shape: a drawn teardrop, built as three concentric rings so the
+ * shader's tone steps land exactly on triangle edges.
  *
- * Deliberately not a disc and deliberately not a soft sprite. The radial
- * modulation uses 3- and 5-lobe terms over 11 segments - all mutually prime, so
- * the shape has no axis of symmetry and eleven instances at eleven rotations do
- * not read as one stamp repeated.
+ * The old shape was a three-lobe radial blob at 11 segments. On screen that is
+ * a hard-edged pentagon or hexagon at an arbitrary rotation - which is exactly
+ * what it was reported as - because a droplet only spans a few pixels and 11
+ * segments of a lumpy radius is a polygon, not a curve.
+ *
+ * This is a teardrop instead: round head, tapered tail, pointed along local +Y,
+ * at 20 segments so the head silhouette resolves as a curve at any size the
+ * particle can reach. The vertex shader aims local +Y down the reverse of the
+ * droplet's velocity, so the tail always streams behind - a comma, the way
+ * spray is drawn - and the small asymmetry term stops eight droplets at eight
+ * angles reading as one stamp repeated.
  *
  * `aRadial` is 0 at the centre and 1 at the rim; the ring radii below are the
  * constants R_CORE / R_BODY in the fragment shader.
  */
 function makeSprayBlob(): THREE.BufferGeometry {
-  const SEGMENTS = 11;
-  // Ring radii, and therefore the tone boundaries. The shade band is the outer
-  // 16% of the radius - about a quarter of the area - because these rings are
-  // concentric: a wide concentric band reads as a vignette, where what is wanted
-  // is a drawn edge. On a droplet only a few pixels across it drops below one
-  // fragment and the particle correctly resolves to a solid white chip.
-  const RINGS = [0.42, 0.84, 1.0];
+  const SEGMENTS = 20;
+  // Ring radii, and therefore the tone boundaries. The contour band is the outer
+  // 14% of the radius - because these rings are concentric, a wide concentric
+  // band reads as a vignette where what is wanted is a drawn edge. On a droplet
+  // only a few pixels across it drops below one fragment and the particle
+  // correctly resolves to a solid chip.
+  const RINGS = [0.52, 0.86, 1.0];
 
   const vertCount = 1 + SEGMENTS * RINGS.length;
   const pos = new Float32Array(vertCount * 3);
   const radial = new Float32Array(vertCount);
 
-  // Normalised so the outer ring peaks at exactly 1.0 and dips to ~0.41.
+  // Teardrop: full radius toward -Y (the head), tapering to ~0.2 toward +Y (the
+  // tail). The cos(2th) term is a slight lateral fattening of the head and the
+  // small phase-shifted term breaks the mirror symmetry into a comma.
+  // Normalised so the maximum radius is exactly 1.0.
   const shape = (th: number): number =>
-    (1 + 0.30 * Math.cos(3 * th) + 0.12 * Math.cos(5 * th + 1.07)) / 1.42;
+    (1 - 0.74 * Math.sin(th) + 0.10 * Math.cos(2 * th) + 0.07 * Math.sin(3 * th + 0.9)) / 1.70;
+
+  // The teardrop's mass sits toward -Y, so the raw curve straddles the origin
+  // badly. Shifting every ring by this *times its own radius* recentres the
+  // silhouette while keeping the three rings exact scaled copies of each other
+  // about the origin - which is what keeps the shader's tone steps on triangle
+  // edges rather than cutting across them.
+  const Y_SHIFT = 0.42;
 
   let v = 1; // vertex 0 is the centre, already (0,0,0) with radial 0
   for (let r = 0; r < RINGS.length; r++) {
     const rr = RINGS[r]!;
     for (let s = 0; s < SEGMENTS; s++) {
       const th = (s / SEGMENTS) * Math.PI * 2;
-      const rad = shape(th) * rr;
-      pos[v * 3 + 0] = Math.cos(th) * rad;
-      pos[v * 3 + 1] = Math.sin(th) * rad;
+      const sh = shape(th);
+      pos[v * 3 + 0] = Math.cos(th) * sh * rr;
+      pos[v * 3 + 1] = (Math.sin(th) * sh + Y_SHIFT) * rr;
       radial[v] = rr;
       v++;
     }
@@ -280,6 +360,7 @@ class WakeRibbon {
 
   private readonly position: THREE.BufferAttribute;
   private readonly data: THREE.BufferAttribute;
+  private readonly wave: THREE.BufferAttribute;
 
   constructor(material: THREE.ShaderMaterial, index: number) {
     const verts = WAKE_MAX_POINTS * 2;
@@ -300,6 +381,17 @@ class WakeRibbon {
     this.data = new THREE.BufferAttribute(dataArr, 4);
     this.data.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('aData', this.data);
+
+    // (wave normal xyz, horizontal Jacobian). The CPU already solves both in the
+    // same sampleSurface call that seats the vertex, so handing them to the
+    // shader costs one buffer and no extra maths. They are what make the ribbon
+    // read as material lying on moving water: the normal gives it the ocean's
+    // own two-band shading over a swell, the Jacobian bunches its foam onto
+    // crests and thins it in troughs.
+    const waveArr = new Float32Array(verts * 4);
+    this.wave = new THREE.BufferAttribute(waveArr, 4);
+    this.wave.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aWave', this.wave);
 
     // Static index buffer covering every possible quad; draw range picks how
     // many are live. Quad j is (2j, 2j+1, 2j+2, 2j+3).
@@ -454,6 +546,7 @@ class WakeRibbon {
 
     const pos = this.position.array as Float32Array;
     const dat = this.data.array as Float32Array;
+    const wav = this.wave.array as Float32Array;
 
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -502,6 +595,10 @@ class WakeRibbon {
       dat[vL * 4 + 0] = arc; dat[vL * 4 + 1] = age01; dat[vL * 4 + 2] = s; dat[vL * 4 + 3] = hw;
       dat[vR * 4 + 0] = arc; dat[vR * 4 + 1] = age01; dat[vR * 4 + 2] = s; dat[vR * 4 + 3] = hw;
 
+      const jac = _surf.jacobian;
+      wav[vL * 4 + 0] = n.x; wav[vL * 4 + 1] = n.y; wav[vL * 4 + 2] = n.z; wav[vL * 4 + 3] = jac;
+      wav[vR * 4 + 0] = n.x; wav[vR * 4 + 1] = n.y; wav[vR * 4 + 2] = n.z; wav[vR * 4 + 3] = jac;
+
       const lo = h - Math.abs(dy);
       const hi = h + Math.abs(dy);
       if (x - hw < minX) minX = x - hw;
@@ -514,6 +611,7 @@ class WakeRibbon {
 
     this.position.needsUpdate = true;
     this.data.needsUpdate = true;
+    this.wave.needsUpdate = true;
     this.mesh.geometry.setDrawRange(0, Math.max(0, (this.count - 1) * 6));
 
     _box.min.set(minX, minY, minZ);
@@ -564,8 +662,6 @@ export class FoamSystem {
   private readonly svy = new Float32Array(SPRAY_POOL);
   private readonly svz = new Float32Array(SPRAY_POOL);
   private readonly sSize = new Float32Array(SPRAY_POOL);
-  private readonly sRot = new Float32Array(SPRAY_POOL);
-  private readonly sRotV = new Float32Array(SPRAY_POOL);
   private readonly sLife = new Float32Array(SPRAY_POOL);
   private readonly sInvLife = new Float32Array(SPRAY_POOL);
   private readonly sState = new Uint8Array(SPRAY_POOL);
@@ -581,6 +677,7 @@ export class FoamSystem {
   private readonly aOffset: THREE.InstancedBufferAttribute;
   private readonly aParams: THREE.InstancedBufferAttribute;
   private readonly aTint: THREE.InstancedBufferAttribute;
+  private readonly aVel: THREE.InstancedBufferAttribute;
 
   /** Wrapped 0..1 foam scroll offsets, one per texture layer. */
   private readonly scroll = new THREE.Vector2();
@@ -613,10 +710,10 @@ export class FoamSystem {
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -4,
       uniforms: {
-        uFoam: { value: TEX.foam },
         uFoamColor: { value: PALETTE.foam.clone() },
         uFoamShade: { value: PALETTE.foamShade.clone() },
-        uTile: { value: new THREE.Vector2(WAKE_TILE_U, WAKE_TILE_V) },
+        uFoamEdge: { value: FOAM_EDGE.clone() },
+        uSunDir: { value: SUN_DIR.clone() },
         uScroll: { value: this.scroll },
         uOpacity: { value: 1 },
         uCameraFar: { value: CAMERA_FAR },
@@ -636,12 +733,15 @@ export class FoamSystem {
     this.aOffset = new THREE.InstancedBufferAttribute(new Float32Array(SPRAY_POOL * 3), 3);
     this.aParams = new THREE.InstancedBufferAttribute(new Float32Array(SPRAY_POOL * 4), 4);
     this.aTint = new THREE.InstancedBufferAttribute(new Float32Array(SPRAY_POOL * 3), 3);
+    this.aVel = new THREE.InstancedBufferAttribute(new Float32Array(SPRAY_POOL * 3), 3);
     this.aOffset.setUsage(THREE.DynamicDrawUsage);
     this.aParams.setUsage(THREE.DynamicDrawUsage);
     this.aTint.setUsage(THREE.DynamicDrawUsage);
+    this.aVel.setUsage(THREE.DynamicDrawUsage);
     blob.setAttribute('aOffset', this.aOffset);
     blob.setAttribute('aParams', this.aParams);
     blob.setAttribute('aTint', this.aTint);
+    blob.setAttribute('aVel', this.aVel);
 
     this.sprayMaterial = new THREE.ShaderMaterial({
       name: 'Spray',
@@ -656,6 +756,7 @@ export class FoamSystem {
       uniforms: {
         uFoamColor: { value: PALETTE.foam.clone() },
         uFoamShade: { value: PALETTE.foamShade.clone() },
+        uFoamEdge: { value: FOAM_EDGE.clone() },
         uOpacity: { value: 1 },
         uCameraFar: { value: CAMERA_FAR },
       },
@@ -714,8 +815,10 @@ export class FoamSystem {
    * speed hint, so passing a velocity vector gives fast spray off a hard landing
    * and passing a unit vector still gives a usable arc.
    *
-   * @param amount intensity - roughly 12 particles per unit, capped per call
-   * @param color  optional racer tint; the droplet stays mostly foam-coloured
+   * @param amount intensity - roughly 8 particles per unit, capped per call
+   * @param color  accepted for call-site compatibility and deliberately ignored:
+   *               whitewater is white, and tinting it toward a racer's body
+   *               colour is what put salmon and mauve shards in the foam
    */
   emitSpray(pos: THREE.Vector3, dir: THREE.Vector3, amount: number, color?: THREE.Color): void {
     if (amount <= 0) return;
@@ -737,10 +840,11 @@ export class FoamSystem {
     _t1.crossVectors(_axis, _dir).normalize();
     _t2.crossVectors(_dir, _t1);
 
-    // Mostly foam, a hint of the racer's colour. Multiplied over the foam
-    // palette in the shader, so a value near white leaves the droplet white.
-    _tint.copy(_white);
-    if (color) _tint.lerp(color, 0.32);
+    // Whitewater is white. The racer's colour is deliberately not consulted -
+    // see SPRAY_TINT_COOL. The droplet varies only along foam-white to crest
+    // cyan, and the amount is per *burst* rather than per particle so one impact
+    // reads as one material rather than as confetti.
+    _tint.copy(_white).lerp(SPRAY_COOL_MUL, this.rng.next() * SPRAY_TINT_COOL);
 
     const baseSpeed = 3.0 + dirLen * 0.6;
 
@@ -759,17 +863,20 @@ export class FoamSystem {
       vy *= il * sp;
       vz *= il * sp;
 
-      // Spawn scattered a little so a burst is a spray, not a starburst.
-      this.sx[j] = pos.x + this.rng.signed() * 0.22;
-      this.sy[j] = pos.y + this.rng.signed() * 0.14;
-      this.sz[j] = pos.z + this.rng.signed() * 0.22;
+      // Spawn scattered a little so a burst is a spray, not a starburst, and
+      // pushed clear of the emitter along the launch direction so droplets do
+      // not begin their life inside the hull that threw them.
+      this.sx[j] = pos.x + _dir.x * SPRAY_SPAWN_PUSH + this.rng.signed() * 0.16;
+      this.sy[j] = pos.y + _dir.y * SPRAY_SPAWN_PUSH + this.rng.signed() * 0.10;
+      this.sz[j] = pos.z + _dir.z * SPRAY_SPAWN_PUSH + this.rng.signed() * 0.16;
       this.svx[j] = vx;
       this.svy[j] = vy;
       this.svz[j] = vz;
 
-      this.sSize[j] = this.rng.range(0.085, 0.26) * (0.82 + dirLen * 0.018);
-      this.sRot[j] = this.rng.range(0, Math.PI * 2);
-      this.sRotV[j] = this.rng.range(-3.6, 3.6);
+      // Half-extents. Smaller than they were: a droplet is a detail on top of
+      // the wake, not a competing shape, and the old 26 cm upper bound put
+      // half-metre cards across the deck of whatever boat emitted them.
+      this.sSize[j] = this.rng.range(0.055, 0.165) * (0.82 + dirLen * 0.018);
       this.sLife[j] = 0;
       this.sInvLife[j] = 1 / this.rng.range(0.55, 1.15);
       this.sState[j] = FLYING;
@@ -824,6 +931,7 @@ export class FoamSystem {
     const off = this.aOffset.array as Float32Array;
     const par = this.aParams.array as Float32Array;
     const tin = this.aTint.array as Float32Array;
+    const vel = this.aVel.array as Float32Array;
 
     const drag = Math.exp(-SPRAY_DRAG * dt);
 
@@ -834,6 +942,9 @@ export class FoamSystem {
       let alpha: number;
       let sizeX: number;
       let sizeY: number;
+      // Elongation along the direction of travel. A droplet moving fast draws
+      // as a streak; one that has slowed to nothing draws as a round chip.
+      let stretch: number;
 
       if (this.sState[i] === FLYING) {
         const t01 = this.sLife[i]! * this.sInvLife[i]!;
@@ -848,7 +959,6 @@ export class FoamSystem {
         const y = this.sy[i]! + this.svy[i]! * dt;
         const z = this.sz[i]! + this.svz[i]! * dt;
         this.sx[i] = x; this.sy[i] = y; this.sz[i] = z;
-        this.sRot[i] = this.sRot[i]! + this.sRotV[i]! * dt;
 
         // See SPRAY_H_REFRESH: stale caches are only tolerated far from the
         // surface, so the impact itself is always tested against a live sample.
@@ -875,6 +985,10 @@ export class FoamSystem {
         const shrink = 1 - 0.66 * t01 * t01;
         sizeX = this.sSize[i]! * shrink;
         sizeY = sizeX;
+        const sp = Math.sqrt(
+          this.svx[i]! * this.svx[i]! + this.svy[i]! * this.svy[i]! + this.svz[i]! * this.svz[i]!,
+        );
+        stretch = 1 + Math.min(1.35, sp * 0.075);
         // Three flat plateaus, no ramp. The final step down to nothing on a
         // particle already at a third of its size is the intended blink-out.
         alpha = t01 < 0.42 ? 1.0 : t01 < 0.74 ? 0.62 : 0.30;
@@ -895,8 +1009,9 @@ export class FoamSystem {
         // Squash: spreads sideways as it collapses vertically, so the impact
         // reads as a mark being made rather than a particle being deleted.
         const base = this.sSize[i]!;
-        sizeX = base * (1 + 0.55 * t01);
-        sizeY = base * (1 - 0.86 * t01);
+        sizeX = base * (1 + 0.30 * t01);
+        sizeY = base * (1 - 0.90 * t01);
+        stretch = 1;
         alpha = t01 < 0.45 ? 0.9 : t01 < 0.78 ? 0.55 : 0.26;
       }
 
@@ -905,11 +1020,14 @@ export class FoamSystem {
       off[i * 3 + 2] = this.sz[i]!;
       par[i * 4 + 0] = sizeX;
       par[i * 4 + 1] = sizeY;
-      par[i * 4 + 2] = this.sRot[i]!;
+      par[i * 4 + 2] = stretch;
       par[i * 4 + 3] = alpha;
       tin[i * 3 + 0] = this.sTint[i * 3 + 0]!;
       tin[i * 3 + 1] = this.sTint[i * 3 + 1]!;
       tin[i * 3 + 2] = this.sTint[i * 3 + 2]!;
+      vel[i * 3 + 0] = this.svx[i]!;
+      vel[i * 3 + 1] = this.svy[i]!;
+      vel[i * 3 + 2] = this.svz[i]!;
       i++;
     }
 
@@ -918,6 +1036,7 @@ export class FoamSystem {
       this.aOffset.needsUpdate = true;
       this.aParams.needsUpdate = true;
       this.aTint.needsUpdate = true;
+      this.aVel.needsUpdate = true;
     }
   }
 
@@ -928,8 +1047,6 @@ export class FoamSystem {
     this.sx[i] = this.sx[last]!; this.sy[i] = this.sy[last]!; this.sz[i] = this.sz[last]!;
     this.svx[i] = this.svx[last]!; this.svy[i] = this.svy[last]!; this.svz[i] = this.svz[last]!;
     this.sSize[i] = this.sSize[last]!;
-    this.sRot[i] = this.sRot[last]!;
-    this.sRotV[i] = this.sRotV[last]!;
     this.sLife[i] = this.sLife[last]!;
     this.sInvLife[i] = this.sInvLife[last]!;
     this.sState[i] = this.sState[last]!;
