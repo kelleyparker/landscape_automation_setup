@@ -14,6 +14,7 @@ import { RaceDirector } from './race/RaceDirector';
 import { AIController } from './race/AIController';
 import { PERSONALITIES } from './race/Personalities';
 import { Boat } from './boat/Boat';
+import { Rider } from './rider/Rider';
 import { Composer } from './render/Composer';
 import { Hud } from './ui/Hud';
 import { Audio } from './audio/Audio';
@@ -32,6 +33,7 @@ export class Game {
   readonly foam: FoamSystem;
   readonly course: Course;
   readonly boats: Boat[] = [];
+  readonly riders: Rider[] = [];
   readonly ai: AIController[] = [];
   readonly director: RaceDirector;
   readonly composer: Composer;
@@ -66,6 +68,15 @@ export class Game {
         foam: this.foam,
       });
       boat.reset(slot.position, slot.heading);
+
+      // The rider is built here rather than inside Boat so the two systems stay
+      // independent - Boat holds it through a structural type and never imports it.
+      const rider = new Rider({ index: i, color: RACER_COLORS[i]!, rng: rng.fork(300 + i) });
+      boat.riderMount.add(rider.root);
+      rider.setYoke(boat.handleLeft, boat.handleRight);
+      boat.rider = rider;
+      this.riders.push(rider);
+
       scene.add(boat.root);
       this.boats.push(boat);
       if (i > 0) this.ai.push(new AIController(boat, this.course, PERSONALITIES[i]!, rng.fork(200 + i)));
@@ -89,11 +100,15 @@ export class Game {
 
       // --- input -----------------------------------------------------------
       const raw = this.input.update(dt);
-      const playerInput: BoatInput =
-        status.phase === 'racing' || status.phase === 'finished'
-          ? raw
-          : { throttle: 0, steer: 0, drift: false, boost: false };
-      this.player.setInput(playerInput);
+      if (this.autopilot && this.playerAI) {
+        this.playerAI.update(dt, t, status, this.boats);
+      } else {
+        const playerInput: BoatInput =
+          status.phase === 'racing' || status.phase === 'finished'
+            ? raw
+            : { throttle: 0, steer: 0, drift: false, boost: false };
+        this.player.setInput(playerInput);
+      }
 
       // --- AI ---------------------------------------------------------------
       for (const a of this.ai) a.update(dt, t, status, this.boats);
@@ -104,6 +119,9 @@ export class Game {
       this.director.update(dt, t);
       this.course.update(dt, t);
       this.foam.update(dt, t);
+      // The foam system tracks where each hull is displacing water; the ocean
+      // shader turns those into depth-difference foam rings. One array, no copy.
+      this.ocean.setInteractors(this.foam.interactors);
       this.ocean.update(dt, t);
       this.sky.update(dt, t);
       this.audio.update(dt, this.player.state, this.director.status);
@@ -148,6 +166,22 @@ export class Game {
       }
     }
   }
+
+  /**
+   * Hands the player's boat to an AI driver. Used by the screenshot harness so
+   * captured frames show the game actually being raced - a stationary boat
+   * cannot demonstrate a wake, a powerslide or a landing, which are exactly the
+   * things the frames exist to verify.
+   */
+  setAutopilot(on: boolean): void {
+    if (on && !this.playerAI) {
+      this.playerAI = new AIController(this.player, this.course, PERSONALITIES[2]!, rng.fork(999));
+    }
+    this.autopilot = on;
+  }
+
+  private playerAI: AIController | null = null;
+  private autopilot = false;
 
   restart(): void {
     const grid = this.course.gridSlots(4);

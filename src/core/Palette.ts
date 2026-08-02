@@ -78,6 +78,13 @@ export const PALETTE = {
   boostFlame: c('#ffe36b'),
   boostFlameHot: c('#ffffff'),
   driftSpark: c('#ff5ea8'),
+  /**
+   * Identity multiplier, for materials whose actual colour arrives per-vertex or
+   * per-instance (course pylons and buoys paint their bands into the `color`
+   * attribute). Not a colour choice - it is the absence of one, and it exists so
+   * those call sites never have to write a literal.
+   */
+  neutral: c('#ffffff'),
 
   // --- HUD -----------------------------------------------------------------
   hudInk: '#101a35',
@@ -106,6 +113,16 @@ export const CSS = {
   p4: '#ff9424',
   sky: '#3fa2ee',
   water: '#1873cf',
+  /** Drift-charge pink. CSS twin of `PALETTE.driftSpark`. */
+  drift: '#ff5ea8',
+  /** Boost gold. CSS twin of `PALETTE.boostFlame`. */
+  boost: '#ffe36b',
+  /** Deep-water blue, for HUD wells such as the minimap ground. Twin of `waterDeep`. */
+  deep: '#0a3a78',
+  /** Crest cyan, for HUD highlights. Twin of `waterCrest`. */
+  crest: '#7ee8f5',
+  /** Foam white, for HUD chequers and hot flashes. Twin of `foam`. */
+  foam: '#eefcff',
 } as const;
 
 /** Racer body colours indexed by racer slot 0..3. */

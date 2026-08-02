@@ -122,6 +122,7 @@ export interface WavebreakHooks {
   listShots(): string[];
   setInput(partial: Partial<BoatInput> | null): void;
   phase(name: string): void;
+  autopilot(on: boolean): void;
   stats(): Record<string, number | string>;
   game: Game;
 }
@@ -167,6 +168,8 @@ export function installTestHooks(game: Game): void {
     },
 
     phase(name: string): void { game.director.forcePhase(name as never); },
+
+    autopilot(on: boolean): void { game.setAutopilot(on); },
 
     stats(): Record<string, number | string> {
       const info = engine.renderer.info;
