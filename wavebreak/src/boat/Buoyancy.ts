@@ -45,15 +45,25 @@ interface Probe {
 
 /**
  * Probe layout. y values sit on the hull bottom at each station, so "depth" is
- * measured from the surface the water actually touches.
+ * measured from the surface the water actually touches, and they track the keel
+ * and chine tables in `BoatMesh`: the bow probe is up on the rockered forefoot,
+ * the shoulders sit on the turn of the bilge and the two pad probes sit on the
+ * flat that the boat actually planes on.
+ *
+ * The layout is aft-heavy in displacement and forward-heavy in lever arm, which
+ * is what makes a hull like this float 3 degrees bow-down at rest and then trim
+ * up onto the pad under power. The trim-up is not free - `BoatPhysics` supplies
+ * it as a speed-squared moment - but the *rest* attitude falls straight out of
+ * these numbers, so they are the ones to move if the boat ever sits wrong at the
+ * start line.
  */
 const PROBES: readonly Probe[] = [
-  { x: 0.00, y: -0.05, z: 1.72, share: 0.16 },   // 0 bow / entry
-  { x: -0.62, y: -0.24, z: 0.30, share: 0.17 },  // 1 port shoulder
-  { x: 0.62, y: -0.24, z: 0.30, share: 0.17 },   // 2 starboard shoulder
-  { x: -0.66, y: -0.30, z: -1.05, share: 0.18 }, // 3 port planing pad
-  { x: 0.66, y: -0.30, z: -1.05, share: 0.18 },  // 4 starboard planing pad
-  { x: 0.00, y: -0.28, z: -2.02, share: 0.14 },  // 5 transom
+  { x: 0.00, y: -0.15, z: 1.58, share: 0.20 },   // 0 bow / entry
+  { x: -0.52, y: -0.20, z: 0.40, share: 0.175 }, // 1 port shoulder
+  { x: 0.52, y: -0.20, z: 0.40, share: 0.175 },  // 2 starboard shoulder
+  { x: -0.57, y: -0.26, z: -1.05, share: 0.155 },// 3 port planing pad
+  { x: 0.57, y: -0.26, z: -1.05, share: 0.155 }, // 4 starboard planing pad
+  { x: 0.00, y: -0.29, z: -1.80, share: 0.14 },  // 5 transom
 ];
 
 export const PROBE_COUNT = PROBES.length;
@@ -85,12 +95,18 @@ const BUOYANCY = 42.0;
 /**
  * Damping against the probe's vertical speed *relative to the water*.
  *
- * 9.0 puts heave at about 44% of critical and pitch at 66% (the pitch dampers sit
+ * 7.4 puts heave at about 36% of critical and pitch at 55% (the pitch dampers sit
  * on long lever arms, so they contribute far more to that mode). Underdamped on
  * purpose: a boat that stops dead after one bob reads as a physics demo, and a
  * couple of overshoots is what makes a landing feel like a landing.
+ *
+ * It came down from 9.0 because at 9 the hull tracked the swell as a filtered
+ * average of it - the attitude moved, but smoothly, and four boats crossing the
+ * same swell all ended up at nearly the same angle. Under-damping is what lets
+ * them arrive at a crest out of phase with each other, which is the difference
+ * between a pack that is riding the sea and a pack that is sliding along it.
  */
-const DAMP = 9.0;
+const DAMP = 7.4;
 
 /** Immersion is allowed past 1 so a deeply buried bow still gains a little push. */
 const MAX_IMMERSION = 1.25;

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { BoatState } from '../core/types';
 import type { Rng } from '../core/Rng';
-import { restHeadOf, type RiderRig } from './RiderRig';
+import { restHeadOf, SCARF_BONES, SCARF_TAIL, type RiderRig } from './RiderRig';
 
 /**
  * Procedural rider animation. There is not a single keyframe in here - every
@@ -124,6 +124,41 @@ interface LegChain {
   side: number;
 }
 
+// ------------------------------------------------------- stance constants ---
+// Bone lengths the pelvis solve needs. Mirrored from RIDER_BONES; read off the
+// rig at construction so they can never drift apart.
+const HIP_DROP = 0.03;
+
+/**
+ * How the torso fold is shared out: pelvis, then the three spine bones. The
+ * pelvis share is needed by the leg solve as well as by the spine, so it lives
+ * here rather than inside update().
+ */
+const SPINE_W: readonly number[] = [0.30, 0.22, 0.24, 0.24];
+
+/**
+ * Where the ankle bone sits when the boot sole is on the deck. The boot box
+ * hangs 0.038 + 0.048 below the ankle, plus a couple of millimetres of ink.
+ */
+const FOOT_PLANE_Y = 0.088;
+/** Feet planted a little behind the rig origin, so the hips can sit back over them. */
+const FOOT_PLANE_Z = -0.015;
+
+/**
+ * THE ASYMMETRY BUDGET.
+ *
+ * A rider seen from behind, standing square, is a prop - it does not matter how
+ * good the crouch is. These are *constant* offsets applied on top of everything
+ * the physics drives, because the physics is near zero on a straight and that is
+ * exactly where the frames were being captured. One shoulder down, spine wound a
+ * few degrees off axis, head turned toward the next corner. Mirrored per racer
+ * so the grid does not all lean the same way.
+ */
+const STANCE_TWIST = 0.15;    // rad of constant spine wind
+const STANCE_LEAN = 0.075;    // rad of constant body roll
+const STANCE_DROP = 0.105;    // rad of shoulder-line tilt
+const STANCE_LOOK = 0.30;     // rad of constant head yaw off the boat's axis
+
 export class RiderAnimator {
   private readonly rig: RiderRig;
   private readonly arms: ArmChain[] = [];
@@ -176,6 +211,11 @@ export class RiderAnimator {
 
   /** Small per-rider offsets so four riders never move in lockstep. */
   private readonly bias: number;
+  /** Which way this rider's stance is broken: +1 or -1. Deterministic per slot. */
+  private readonly stance: number;
+  /** Thigh and shin lengths, read off the rig so the pelvis solve cannot disagree. */
+  private readonly thighLen: number;
+  private readonly shinLen: number;
 
   constructor(rig: RiderRig, rng: Rng, index: number) {
     this.rig = rig;
@@ -199,29 +239,35 @@ export class RiderAnimator {
         l2: hand.position.length(),
         side,
         handle: null,
-        fx: side * 0.205, fy: 0.975, fz: 0.345,
+        // Fallback bar, in rig-local space. Matches the boat's real grips once
+        // the rig root has been pushed forward toward the yoke by Rider.ts.
+        fx: side * 0.265, fy: 0.505, fz: 0.435,
       });
       this.legs.push({ thigh: b[`thigh${S}`]!, shin: b[`shin${S}`]!, foot: b[`foot${S}`]!, side });
     }
 
-    for (const n of ['scarf0', 'scarf1', 'scarf2', 'scarf3']) this.scarfBones.push(b[n]!);
-    // Four free points: the heads of scarf1..3 plus the tail of scarf3.
-    const chain = ['scarf1', 'scarf2', 'scarf3'];
-    let prev = restHeadOf('scarf0');
-    for (const n of chain) {
-      const p = restHeadOf(n);
+    this.thighLen = this.legs[0]!.shin.position.length();
+    this.shinLen = this.legs[0]!.foot.position.length();
+
+    for (const n of SCARF_BONES) this.scarfBones.push(b[n]!);
+    // One free point per link past the root, plus the tail tip.
+    let prev = restHeadOf(SCARF_BONES[0]!);
+    for (let i = 1; i < SCARF_BONES.length; i++) {
+      const p = restHeadOf(SCARF_BONES[i]!);
       this.sLen.push(p.distanceTo(prev));
       this.sCur.push(p.clone());
       this.sPrev.push(p.clone());
       prev = p;
     }
-    const tailEnd = restHeadOf('scarf3').clone().add(_tmp.set(0, 0, -0.15));
+    const tailEnd = restHeadOf(SCARF_BONES[SCARF_BONES.length - 1]!)
+      .clone().add(_tmp.set(0, 0, -SCARF_TAIL));
     this.sLen.push(tailEnd.distanceTo(prev));
     this.sCur.push(tailEnd.clone());
     this.sPrev.push(tailEnd.clone());
 
     this.flutterPhase = rng.range(0, Math.PI * 2) + index * 1.7;
     this.bias = rng.range(-1, 1);
+    this.stance = index % 2 === 0 ? 1 : -1;
   }
 
   /** Explicit wiring, if the integration layer would rather not rely on names. */
@@ -304,14 +350,35 @@ export class RiderAnimator {
     const celebBody = this.sCelebBody.step((pumpR + pumpL) * 0.5, h, 9, 0.5);
 
     // ---------------------------------------------------------- crouch ------
+    // Vertical absorption: when the hull is thrown up, the rider sinks into the
+    // legs, and vice versa. Driven by heave, not by a free sine, so it stays
+    // locked to the water the boat is actually on. It feeds the *crouch* and not
+    // a translation of the hips, because the boots are on the deck: absorbing a
+    // swell by sliding the whole body down lifts the feet off it.
+    const heaveDip = this.sHeave.step(clamp(state.heave, -7, 7) * 0.017, h, 14, 0.8);
+
     // Base stance deepens with speed, coils on the start line, and *rises*
     // while airborne (knees come up, body extends). The landing spring is added
     // on top so a slam always compresses from wherever the pose already was.
-    let crouchT = 0.30 + 0.30 * speed01 + 0.26 * drift + 0.24 * boost;
+    //
+    // The numbers here are much deeper than a naturalistic standing pose, and
+    // that is deliberate on two counts. First, the boat's yoke sits 0.72m
+    // forward of the rider's feet and only 0.485m above them - a rider standing
+    // anywhere near upright cannot physically hold it, which is why the hands
+    // were 45cm off the bars. Second, an upright figure seen from behind is a
+    // vertical rectangle; a folded one is a wedge with a visible back, a head
+    // that breaks the line and arms that leave the body. The crouch is doing
+    // silhouette work, not just physics.
+    let crouchT = 0.56 + 0.56 * speed01 + 0.26 * drift + 0.24 * boost;
     if (preRace) crouchT += 0.30;
-    crouchT -= 0.42 * air;
-    crouchT -= 0.30 * celeb;
-    const crouch = clamp(this.sCrouch.step(crouchT, h, 9, 0.85) + this.sLand.value, -0.15, 1.5);
+    // Chop keeps the airborne flag flickering on at racing speed; a full 0.42
+    // of unweighting per unit of it stood the rider straight back up.
+    crouchT -= 0.26 * air;
+    crouchT -= 0.34 * celeb;
+    const crouch = clamp(
+      this.sCrouch.step(crouchT, h, 9, 0.85) + this.sLand.value + heaveDip * 2.6,
+      -0.15, 1.5,
+    );
 
     // ---------------------------------------------------------- body pose ---
     // Lean into the turn like a rider, then take some of the hull's bank back
@@ -323,14 +390,28 @@ export class RiderAnimator {
     const rollRate = (state.roll - this.prevRoll) / h;
     this.prevRoll = state.roll;
     this.rollRateLp += (rollRate - this.rollRateLp) * clamp01(h * 12);
+    //
+    // The stance term is the important one. On a straight, every physics-driven
+    // input to this expression is within a few thousandths of zero, and the
+    // result was a bilaterally symmetric figure - which is the difference
+    // between a character and a mannequin, whatever else the rig is doing.
+    const sway = Math.sin(elapsed * 0.83 + this.bias * 4.1);
     const leanT =
-      (0.30 + 0.20 * drift) * turn * (0.45 + 0.55 * speed01)
+      (0.34 + 0.22 * drift) * turn * (0.45 + 0.55 * speed01)
       + 0.30 * state.roll
-      + 0.09 * clamp(this.rollRateLp, -4, 4);
-    const lean = this.sLean.step(clamp(leanT, -0.65, 0.65), h, 10, 0.72);
+      + 0.09 * clamp(this.rollRateLp, -4, 4)
+      + this.stance * STANCE_LEAN * (0.55 + 0.45 * speed01)
+      + 0.030 * sway;
+    const lean = this.sLean.step(clamp(leanT, -0.70, 0.70), h, 10, 0.72);
 
-    // Torso opens slightly out of the corner while the arms stay on the yoke.
-    const twist = this.sTwist.step(-turn * 0.15, h, 9, 0.8);
+    // Torso opens out of the corner while the arms stay on the yoke, and carries
+    // a permanent few degrees of wind so the shoulders are never square to the
+    // hull's centreline.
+    const twistT =
+      -turn * 0.18
+      + this.stance * STANCE_TWIST * (0.5 + 0.5 * speed01)
+      + 0.035 * Math.sin(elapsed * 0.61 + this.bias * 2.3);
+    const twist = this.sTwist.step(twistT, h, 9, 0.8);
 
     // Weight shift. Positive rotation.x pitches the chest forward, so we lean
     // *back* under acceleration and fold forward under braking. The state.pitch
@@ -338,37 +419,88 @@ export class RiderAnimator {
     // want to follow the bow up a wave face.
     const idleBreath = (1 - speed01) * 0.020 * Math.sin(elapsed * 1.7 + this.bias * 3);
     const pitchT =
-      0.20 + 0.34 * speed01
-      - 0.34 * accelN
-      + 0.30 * crouch
-      + 0.26 * boost
+      0.28 + 0.50 * speed01
+      - 0.30 * accelN
+      + 0.36 * crouch
+      + 0.30 * boost
       - 0.42 * state.pitch
-      - 0.55 * celebBody
+      - 0.70 * celebBody
       + idleBreath;
-    const pitchLean = this.sPitch.step(clamp(pitchT, -0.55, 0.95), h, 8.5, 0.7);
-
-    // Vertical absorption: when the hull is thrown up, the rider sinks into the
-    // legs, and vice versa. Driven by heave, not by a free sine, so it stays
-    // locked to the water the boat is actually on.
-    const heaveDip = this.sHeave.step(clamp(state.heave, -7, 7) * 0.017, h, 14, 0.8);
+    // ~46 degrees of fold at racing speed, capped at 57. This is a two-sided
+    // constraint, not a free dial. Too shallow and the shoulders stay too high
+    // and too far back for the hands to find the bars at all. Too deep and the
+    // back turns square-on to a chase camera that already looks slightly down,
+    // which hands the frame one large flat plate of suit colour - the same slab
+    // read the fold was supposed to break, arriving from the other direction.
+    const pitchLean = this.sPitch.step(clamp(pitchT, -0.55, 1.00), h, 8.5, 0.7);
 
     // Kept small on purpose: a big shrug plus a forward lean swallows the head.
     const shrug = this.sShrug.step(0.02 + 0.13 * crouch + 0.42 * celebBody + 0.08 * air, h, 11, 0.8);
 
-    // Pelvis: the crouch lives here, plus the heave absorption and a small
-    // rearward shift so a deep crouch does not push the rider through the yoke.
+    // ------------------------------------------------------------- legs -----
+    // Solved before the pelvis, because the pelvis is placed *from* the legs.
+    const pelvisPitch = pitchLean * SPINE_W[0]!;
+    const tuck = air;
+    let legY = 0;
+    let legZ = 0;
+    for (let i = 0; i < this.legs.length; i++) {
+      const L = this.legs[i]!;
+      // Drift: the *outside* leg braces straight, the inside knee folds under.
+      const extend = drift * clamp01(-L.side * turn);
+      const fold = drift * clamp01(L.side * turn);
+      // A permanent stagger: one foot forward of the other. Two legs at matching
+      // angles read as one column from behind however far apart they are.
+      const stagger = L.side * this.stance * 0.16;
+      const bend = (0.46 + 0.86 * crouch) * (1 - 0.50 * extend) + 0.30 * fold + 0.10 * stagger;
+      L.thigh.rotation.set(
+        -bend * 0.55 - tuck * 0.62 + extend * 0.22 - stagger * 0.20,
+        -L.side * 0.05,
+        // Knees driven outboard: the negative space between the thighs is what
+        // stops the lower body reading as one tapering orange column.
+        L.side * (0.15 + 0.13 * extend),
+      );
+      L.shin.rotation.set(bend * 1.15 + tuck * 0.55 - extend * 0.30, 0, 0);
+      // Keep the sole roughly on the deck whatever the knees are doing.
+      L.foot.rotation.set(
+        -(L.thigh.rotation.x + L.shin.rotation.x) * 0.82 - tuck * 0.25,
+        0,
+        -L.side * (0.12 + 0.10 * extend),
+      );
+      // Angles measured in RIG space, not pelvis space: the pelvis is itself
+      // pitched by its share of the fold, and at 0.33rad of it that omission put
+      // the boots 5cm in the air and 18cm behind where they belong.
+      const t1 = pelvisPitch + L.thigh.rotation.x;
+      const t2 = t1 + L.shin.rotation.x;
+      legY += this.thighLen * Math.cos(t1) + this.shinLen * Math.cos(t2);
+      legZ += this.thighLen * Math.sin(t1) + this.shinLen * Math.sin(t2);
+    }
+    legY = legY / this.legs.length + HIP_DROP * Math.cos(pelvisPitch);
+    legZ = legZ / this.legs.length + HIP_DROP * Math.sin(pelvisPitch);
+
+    /*
+     * Pelvis, solved from the legs rather than dropped by a fixed fraction of
+     * the crouch. The legs are pure FK, so a "deeper crouch" that only bends the
+     * knees lifts the feet clean off the deck; the old fixed drop and the leg
+     * bend disagreed by several centimetres and the boots floated. Placing the
+     * hips at (foot plane + leg chain) makes the two agree by construction, at
+     * any crouch depth, which is what lets the crouch go as deep as the yoke
+     * needs it to.
+     */
     const pelvisRest = restHeadOf('pelvis');
     this.pelvis.position.set(
       pelvisRest.x,
-      pelvisRest.y - crouch * 0.135 - heaveDip + celebBody * 0.035,
-      pelvisRest.z - crouch * 0.055,
+      // The air tuck is the one case where the feet are *meant* to leave the
+      // deck, so the height the folded legs would otherwise steal is handed
+      // back: knees come up under a stationary body instead of the body
+      // sinking onto stationary feet.
+      FOOT_PLANE_Y + legY + air * 0.11 + celebBody * 0.035,
+      FOOT_PLANE_Z + legZ,
     );
     // The lean/twist/pitch is spread down the spine so the back reads as a
     // curve rather than as one hinge at the hips.
-    const W = [0.30, 0.22, 0.24, 0.24];
-    this.pelvis.rotation.set(pitchLean * W[0]!, twist * W[0]!, -lean * W[0]!);
+    this.pelvis.rotation.set(pelvisPitch, twist * SPINE_W[0]!, -lean * SPINE_W[0]!);
     for (let i = 0; i < 3; i++) {
-      const w = W[i + 1]!;
+      const w = SPINE_W[i + 1]!;
       this.spine[i]!.rotation.set(pitchLean * w, twist * w, -lean * w);
     }
 
@@ -378,52 +510,56 @@ export class RiderAnimator {
     // still lands where the boat is going.
     // 16 rad/s and slightly underdamped: the head leads the body into a corner
     // and settles with a small overshoot, which is what reads as "looking".
-    const headYaw = this.sHeadYaw.step(clamp(turn * 0.62, -0.8, 0.8), h, 16, 0.75);
+    const headYawT =
+      turn * 0.70
+      // Looking somewhere. A head aligned dead on the boat's axis is the last
+      // thing that has to go before a figure stops reading as cargo.
+      + this.stance * STANCE_LOOK * (0.6 + 0.4 * speed01)
+      + 0.06 * Math.sin(elapsed * 0.47 + this.bias * 5.5);
+    const headYaw = this.sHeadYaw.step(clamp(headYawT, -0.9, 0.9), h, 16, 0.75);
     const headPitchT =
+      // The deeper the fold, the further the chin has to come up to keep the
+      // eyes on the water - and the more of the visor the camera gets.
       -0.05 + 0.16 * speed01
       + 0.14 * boost
       - 0.30 * air
       - 0.45 * celebBody
-      + 0.25 * clamp01(-accelN);
+      + 0.25 * clamp01(-accelN)
+      // Chin comes UP as the back goes down, or a folded rider stares at the
+      // footwell and the camera gets the top of a helmet instead of a visor.
+      - 0.30 * clamp01(pitchLean);
     const headPitch = this.sHeadPitch.step(headPitchT, h, 13, 0.7);
 
     // Neck takes 40% so the head is a two-bone curve, not a swivel on a stick.
+    // The head counter-rolls: it stays closer to level than the shoulders, the
+    // way a person's does, which also keeps the visor facing the camera.
     this.neck.rotation.set(
-      (headPitch - pitchLean * 0.55) * 0.4,
+      (headPitch - pitchLean * 0.88) * 0.4,
       (headYaw - twist) * 0.4,
-      lean * 0.30 * 0.4,
+      -lean * 0.22 * 0.4,
     );
     this.head.rotation.set(
-      (headPitch - pitchLean * 0.55) * 0.6,
+      (headPitch - pitchLean * 0.88) * 0.6,
       (headYaw - twist) * 0.6,
-      lean * 0.30 * 0.6,
+      -lean * 0.22 * 0.6,
     );
 
-    // ------------------------------------------------------------- legs -----
-    const tuck = air;
-    for (let i = 0; i < this.legs.length; i++) {
-      const L = this.legs[i]!;
-      // Drift: the *outside* leg braces straight, the inside knee folds under.
-      const extend = drift * clamp01(-L.side * turn);
-      const fold = drift * clamp01(L.side * turn);
-      const bend = (0.42 + 0.80 * crouch) * (1 - 0.50 * extend) + 0.30 * fold;
-      L.thigh.rotation.set(
-        -bend * 0.55 - tuck * 0.62 + extend * 0.22,
-        -L.side * 0.05,
-        L.side * (0.07 + 0.13 * extend),
-      );
-      L.shin.rotation.set(bend * 1.15 + tuck * 0.55 - extend * 0.30, 0, 0);
-      // Keep the sole roughly on the deck whatever the knees are doing.
-      L.foot.rotation.set(
-        -(L.thigh.rotation.x + L.shin.rotation.x) * 0.82 - tuck * 0.25,
-        0,
-        -L.side * (0.05 + 0.10 * extend),
-      );
-    }
-
-    // Clavicles: shoulders lift with the shrug and roll forward toward the yoke.
+    /*
+     * Clavicles. Three jobs:
+     *   y - swings the arm root forward around the ribcage toward the yoke,
+     *   z - the shrug, symmetric, plus a CONSTANT tilt of the whole shoulder
+     *       line. The constant is not a shrug: it is applied with the same sign
+     *       to both clavicles, so one shoulder rises as the other drops. That
+     *       single term is the difference between a posed character and a
+     *       coat-hanger, and it survives a dead-straight racing line.
+     */
+    const shoulderTilt = this.stance * STANCE_DROP * (1 - 0.7 * celeb);
     for (const a of this.arms) {
-      a.clav.rotation.set(0, -a.side * (0.11 - 0.16 * celeb), a.side * (shrug - 0.02));
+      a.clav.rotation.set(
+        0,
+        -a.side * (0.15 - 0.20 * celeb),
+        a.side * (shrug - 0.02) + shoulderTilt,
+      );
     }
 
     // Everything above is FK, so the world matrices have to be rebuilt before
@@ -441,7 +577,14 @@ export class RiderAnimator {
       const pump = a.side > 0 ? pumpR : pumpL;
       // One arm comes off the bars in the air - never both, and never while
       // drifting, when the rider needs the yoke.
-      const airArm = a.side < 0 ? air * 0.55 * (1 - drift) * (1 - celeb) : 0;
+      //
+      // Gated hard above 0.55. Racing chop keeps the airborne flag flickering,
+      // and the smoothed signal sits around 0.26 the whole way down a straight;
+      // a linear response to that left the port hand permanently 18cm off the
+      // bar, which measured as "hands not on the yoke" in every frame. Only a
+      // real jump should take a hand off.
+      const bigAir = clamp01((air - 0.55) / 0.45);
+      const airArm = a.side < 0 ? bigAir * 0.80 * (1 - drift) * (1 - celeb) : 0;
       this.armTarget(a, steer, pump, celeb, airArm);
       this.solveArm(a, celeb, pump);
     }
@@ -552,7 +695,13 @@ export class RiderAnimator {
 
     // Pole in rider space, then into world. Elbows swing out and back on the
     // bars; when the arm is punching overhead they drop out to the side.
-    _pole.set(a.side * (0.55 + 0.75 * celeb), -1 + 0.85 * celeb * pump, -0.55 + 0.35 * celeb);
+    //
+    // The outboard term is heavy (1.05, was 0.55) for a staging reason rather
+    // than an anatomical one: the elbow is the only part of the arm the chase
+    // camera can see leave the body, and it is what opens the gap of daylight
+    // between the upper arm and the ribcage. Tucked elbows weld the arms to the
+    // torso and the whole figure closes into one blob.
+    _pole.set(a.side * (1.05 + 0.75 * celeb), -1 + 0.85 * celeb * pump, -0.62 + 0.42 * celeb);
     _pole.applyQuaternion(_qroot).normalize();
     _pole.addScaledVector(_dir, -_pole.dot(_dir));
     if (_pole.lengthSq() < 1e-6) _pole.set(0, 1, 0).addScaledVector(_dir, -_dir.y);
@@ -617,7 +766,7 @@ export class RiderAnimator {
     _wind.y += 0.35 + 1.1 * speed01;
 
     const GRAV = -8.4;      // light, but enough that the tail always falls away
-    const DRAG = 3.4;       // 1/s, how hard the air pulls the cloth to its speed
+    const DRAG = 2.9;       // 1/s, how hard the air pulls the cloth to its speed
     const DAMP = 0.985;
 
     for (let i = 0; i < this.sCur.length; i++) {
@@ -627,10 +776,17 @@ export class RiderAnimator {
       _tmp.copy(cur).sub(prev).multiplyScalar(DAMP);
       const invH = 1 / h;
       // a = gravity + drag toward the local air velocity + edge flutter.
-      const flut = Math.sin(elapsed * (9.0 + i * 1.6) + this.flutterPhase) * (0.6 + 3.2 * speed01) * (0.35 + 0.25 * i);
+      // Two beat frequencies rather than one: a single sine down a five-link
+      // chain drives every link in near-lockstep and the whole scarf waves as
+      // one rigid board. The second, slower term at a different phase per link
+      // is what makes it travel a wave along its own length.
+      const ph = this.flutterPhase + i * 1.15;
+      const amp = (0.9 + 4.6 * speed01) * (0.30 + 0.30 * i);
+      const flut = Math.sin(elapsed * (9.0 + i * 1.6) + ph) * amp
+        + Math.sin(elapsed * 3.7 - i * 0.9 + this.flutterPhase * 1.7) * amp * 0.55;
       _tmp2.copy(_wind).addScaledVector(_tmp, -invH).multiplyScalar(DRAG);
-      _tmp2.y += GRAV + flut * 0.30;
-      _tmp2.x += flut * 0.42;
+      _tmp2.y += GRAV + flut * 0.38;
+      _tmp2.x += flut * 0.52;
       _tmp2.z += flut * 0.15;
 
       prev.copy(cur);

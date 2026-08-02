@@ -28,9 +28,15 @@ import { CEL_PRESETS, makeCelMaterial } from '../render/CelMaterial';
  *   the falloff is smooth, so joints bend without creasing.
  *
  * BUDGET
- *   ~1.3k triangles of body. The ink shell reuses the same geometry, so a rider
+ *   ~2.0k triangles of body. The ink shell reuses the same geometry, so a rider
  *   costs roughly double that on screen. Six materials, six draw calls (twelve
  *   with ink) - the split is by lighting response, not by body part.
+ *
+ *   The extra ~700 over the first pass all went into three things, and all three
+ *   were bought deliberately: a 12-sided torso instead of an 8-sided one, deltoid
+ *   and shoulder-pad caps, and dark panels standing proud of the suit at the hips
+ *   and shoulder blades. At four riders that is ~5.5k triangles of the frame's
+ *   210k, and it is the difference between a character and a painted plank.
  */
 
 // --------------------------------------------------------------- skeleton ---
@@ -49,11 +55,23 @@ export interface BoneSpec {
 }
 
 /**
- * 24 bones. Proportions are stylised-anime: ~6.4 heads tall at 1.58m, chunky
+ * 25 bones. Proportions are stylised-anime: ~6.4 heads tall at 1.58m, chunky
  * limbs, small hands and feet relative to a real figure. The rest pose is
  * upright with the arms hanging - the racing crouch is applied by the animator,
  * so the bind pose stays neutral and the skinning never starts from a deformed
  * state.
+ *
+ * SHOULDER WIDTH IS LOAD-BEARING. The clavicle plants the arm root at x = 0.206,
+ * against a chest half-width of 0.150 - a 5.6cm shelf. Any narrower and the upper
+ * arm is *inside* the ribcage at the shoulder, the two ink shells merge, and the
+ * whole figure collapses into one rounded-rectangle silhouette with no daylight
+ * between arm and torso. That is precisely the "flat orange slab" failure.
+ *
+ * ARM LENGTH IS LOAD-BEARING TOO. Shoulder-to-wrist is 0.546m, long for the
+ * height on purpose: the yoke grips sit 0.72m forward of the rider's feet and
+ * only 0.485m above them, and a naturalistic 0.49m arm simply cannot touch them
+ * from any pose a standing rider can hold. Short arms here means hands floating
+ * 45cm off the bars, which is what the frames showed.
  */
 export const RIDER_BONES: readonly BoneSpec[] = [
   { name: 'pelvis', parent: null, offset: [0, 0.86, 0], tail: [0, -0.09, 0] },
@@ -66,31 +84,41 @@ export const RIDER_BONES: readonly BoneSpec[] = [
   { name: 'neck', parent: 'spine2', offset: [0, 0.13, 0.005], tail: [0, 0.105, 0] },
   { name: 'head', parent: 'neck', offset: [0, 0.105, 0], tail: [0, 0.16, 0.01] },
 
-  { name: 'clavR', parent: 'spine2', offset: [0.045, 0.075, 0.012], tail: [0.13, -0.02, 0] },
-  { name: 'upperArmR', parent: 'clavR', offset: [0.135, -0.02, 0], tail: [0, -0.25, 0] },
-  { name: 'foreArmR', parent: 'upperArmR', offset: [0, -0.25, 0], tail: [0, -0.243, 0] },
-  { name: 'handR', parent: 'foreArmR', offset: [0, -0.243, 0], tail: [0, -0.085, 0.02] },
+  { name: 'clavR', parent: 'spine2', offset: [0.056, 0.076, 0.010], tail: [0.150, -0.024, 0] },
+  { name: 'upperArmR', parent: 'clavR', offset: [0.150, -0.024, 0], tail: [0, -0.278, 0] },
+  { name: 'foreArmR', parent: 'upperArmR', offset: [0, -0.278, 0], tail: [0, -0.268, 0] },
+  { name: 'handR', parent: 'foreArmR', offset: [0, -0.268, 0], tail: [0, -0.090, 0.022] },
 
-  { name: 'clavL', parent: 'spine2', offset: [-0.045, 0.075, 0.012], tail: [-0.13, -0.02, 0] },
-  { name: 'upperArmL', parent: 'clavL', offset: [-0.135, -0.02, 0], tail: [0, -0.25, 0] },
-  { name: 'foreArmL', parent: 'upperArmL', offset: [0, -0.25, 0], tail: [0, -0.243, 0] },
-  { name: 'handL', parent: 'foreArmL', offset: [0, -0.243, 0], tail: [0, -0.085, 0.02] },
+  { name: 'clavL', parent: 'spine2', offset: [-0.056, 0.076, 0.010], tail: [-0.150, -0.024, 0] },
+  { name: 'upperArmL', parent: 'clavL', offset: [-0.150, -0.024, 0], tail: [0, -0.278, 0] },
+  { name: 'foreArmL', parent: 'upperArmL', offset: [0, -0.278, 0], tail: [0, -0.268, 0] },
+  { name: 'handL', parent: 'foreArmL', offset: [0, -0.268, 0], tail: [0, -0.090, 0.022] },
 
-  { name: 'thighR', parent: 'pelvis', offset: [0.095, -0.03, 0], tail: [0, -0.42, 0] },
+  { name: 'thighR', parent: 'pelvis', offset: [0.107, -0.03, 0], tail: [0, -0.42, 0] },
   { name: 'shinR', parent: 'thighR', offset: [0, -0.42, 0], tail: [0, -0.33, 0] },
   { name: 'footR', parent: 'shinR', offset: [0, -0.33, 0], tail: [0, -0.03, 0.14] },
 
-  { name: 'thighL', parent: 'pelvis', offset: [-0.095, -0.03, 0], tail: [0, -0.42, 0] },
+  { name: 'thighL', parent: 'pelvis', offset: [-0.107, -0.03, 0], tail: [0, -0.42, 0] },
   { name: 'shinL', parent: 'thighL', offset: [0, -0.42, 0], tail: [0, -0.33, 0] },
   { name: 'footL', parent: 'shinL', offset: [0, -0.33, 0], tail: [0, -0.03, 0.14] },
 
   // Scarf: rest pose streams straight back, which is where it spends most of
   // its life at racing speed. Simulated by the animator, skinned like any limb.
-  { name: 'scarf0', parent: 'neck', offset: [0, 0.02, -0.09], tail: [0, 0, -0.16] },
-  { name: 'scarf1', parent: 'scarf0', offset: [0, 0, -0.16], tail: [0, 0, -0.16] },
-  { name: 'scarf2', parent: 'scarf1', offset: [0, 0, -0.16], tail: [0, 0, -0.15] },
-  { name: 'scarf3', parent: 'scarf2', offset: [0, 0, -0.15], tail: [0, 0, -0.15] },
+  // Five links and ~0.82m of cloth. Four short stiff links read as a plank
+  // bolted to the neck; the extra length and the extra hinge are what let the
+  // tail curl and cross its own line, which is the whole point of putting a
+  // scarf on a rider at 95km/h.
+  { name: 'scarf0', parent: 'neck', offset: [0, 0.02, -0.085], tail: [0, 0, -0.150] },
+  { name: 'scarf1', parent: 'scarf0', offset: [0, 0, -0.150], tail: [0, 0, -0.160] },
+  { name: 'scarf2', parent: 'scarf1', offset: [0, 0, -0.160], tail: [0, 0, -0.170] },
+  { name: 'scarf3', parent: 'scarf2', offset: [0, 0, -0.170], tail: [0, 0, -0.170] },
+  { name: 'scarf4', parent: 'scarf3', offset: [0, 0, -0.170], tail: [0, 0, -0.165] },
 ] as const;
+
+/** The simulated part of the scarf, root first. The animator drives exactly these. */
+export const SCARF_BONES: readonly string[] = ['scarf0', 'scarf1', 'scarf2', 'scarf3', 'scarf4'];
+/** Free tail past the last scarf bone's head, metres. The verlet's final point. */
+export const SCARF_TAIL = 0.165;
 
 export const BONE_INDEX: Record<string, number> = (() => {
   const m: Record<string, number> = {};
@@ -488,7 +516,13 @@ class SkinBuilder {
 // ------------------------------------------------------------- body parts ---
 
 const R_LIMB = 8;   // radial segments on limbs - enough for a clean ink silhouette
-const R_TORSO = 8;
+/**
+ * 12 on the torso, not 8. An eight-sided prism presents two nearly coplanar
+ * facets across the back, and a cel ramp quantises both of them to the same
+ * band - which is exactly how a body turns into a painted plank when it is seen
+ * from behind. Twelve puts a value break either side of the spine.
+ */
+const R_TORSO = 12;
 
 function armPoints(side: number): THREE.Vector3[] {
   const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
@@ -509,18 +543,42 @@ function buildSuit(): THREE.BufferGeometry {
   const b = new SkinBuilder();
 
   b.use(['pelvis', 'spine0', 'spine1', 'spine2', 'neck', 'clavL', 'clavR']);
+  /*
+   * The chest ring is DEEPER (rz) than it is WIDE (rx). That is not anatomy, it
+   * is staging: this character is seen from three-quarter rear at 40-120px tall,
+   * and a section that is wide and shallow presents the camera a flat plate that
+   * the ramp shades in one band. A barrel section turns the whole back into a
+   * cylinder the light can wrap around, and the width the silhouette needs comes
+   * from the deltoid caps below instead - which is also where a drawn character
+   * carries it.
+   *
+   * The z column bows the section forward through the chest and back through the
+   * seat, so the spine is an S in profile rather than a broom handle.
+   */
   b.loft(
     [
-      { y: 0.795, rx: 0.126, rz: 0.096 }, // seat
-      { y: 0.885, rx: 0.142, rz: 0.106 }, // hips
-      { y: 0.985, rx: 0.122, rz: 0.093 }, // waist - pinched so the ink reads a shape
-      { y: 1.090, rx: 0.150, rz: 0.109 }, // ribs
-      { y: 1.185, rx: 0.170, rz: 0.114 }, // chest
-      { y: 1.255, rx: 0.152, rz: 0.100 }, // shoulder yoke
-      { y: 1.300, rx: 0.086, rz: 0.076 }, // neck base
+      { y: 0.788, rx: 0.110, rz: 0.114, z: -0.016 }, // seat, sat back
+      { y: 0.885, rx: 0.128, rz: 0.126, z: -0.020 }, // hips - narrower than the
+                                                     // shoulder caps, always
+      { y: 0.985, rx: 0.108, rz: 0.114, z: -0.002 }, // waist - pinched hard
+      { y: 1.088, rx: 0.134, rz: 0.146, z: 0.012 },  // lower ribs
+      { y: 1.180, rx: 0.150, rz: 0.158, z: 0.016 },  // chest - deeper than wide
+      { y: 1.252, rx: 0.146, rz: 0.132, z: 0.006 },  // shoulder yoke
+      { y: 1.304, rx: 0.082, rz: 0.078, z: 0.004 },  // neck base
     ],
     R_TORSO, true, true,
   );
+
+  // Deltoid caps. Without these the arm tube starts at a hard cylinder end
+  // buried in the ribcage and the shoulder line runs dead flat across the top
+  // of the torso - the single clearest tell of a slab. The ball is centred just
+  // inboard of the arm root so it welds into the yoke ring and rounds over.
+  for (const side of [1, -1]) {
+    const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
+    const S = side > 0 ? 'R' : 'L';
+    b.use([`clav${S}`, `upperArm${S}`, 'spine2']);
+    b.sphere(sh.x - side * 0.014, sh.y + 0.010, sh.z + 0.002, 0.086, 0.088, 0.084, R_TORSO, 5);
+  }
 
   // Whole arm, shoulder to wrist, in the racer colour. The forearm was dark at
   // first and the arm merged with the glove into one black slab against the
@@ -531,10 +589,12 @@ function buildSuit(): THREE.BufferGeometry {
     const sh = p[0]!, el = p[1]!, wr = p[2]!;
     const S = side > 0 ? 'R' : 'L';
     b.use([`clav${S}`, `upperArm${S}`, `foreArm${S}`, 'spine2']);
-    _t.copy(sh).lerp(el, 0.4);
-    b.tube([sh, _t.clone(), el], [0.062, 0.066, 0.050], R_LIMB, 0.85, 0.5);
+    _t.copy(sh).lerp(el, 0.42);
+    // Slimmer than the torso by a clear margin: an arm as fat as the ribcage
+    // cannot read as a separate form no matter how far out it is held.
+    b.tube([sh, _t.clone(), el], [0.058, 0.061, 0.046], R_LIMB, 0.85, 0.5);
     b.use([`upperArm${S}`, `foreArm${S}`, `hand${S}`]);
-    b.tube([el, wr], [0.049, 0.040], R_LIMB, 0.4, 0.35);
+    b.tube([el, wr], [0.045, 0.036], R_LIMB, 0.4, 0.35);
   }
 
   for (const side of [1, -1]) {
@@ -542,7 +602,7 @@ function buildSuit(): THREE.BufferGeometry {
     const hip = p[0]!, kn = p[1]!;
     b.use(['pelvis', side > 0 ? 'thighR' : 'thighL', side > 0 ? 'shinR' : 'shinL']);
     _t.copy(hip).lerp(kn, 0.45);
-    b.tube([hip, _t.clone(), kn], [0.104, 0.106, 0.080], R_LIMB, 0.6, 0.45);
+    b.tube([hip, _t.clone(), kn], [0.092, 0.094, 0.070], R_LIMB, 0.6, 0.45);
   }
 
   return b.build('rider_suit');
@@ -556,27 +616,88 @@ function buildSuit(): THREE.BufferGeometry {
 function buildGear(): THREE.BufferGeometry {
   const b = new SkinBuilder();
 
-  // Belt, standing a little proud of the waist.
+  /*
+   * Shorts and belt.
+   *
+   * Both of these existed before and neither was visible, because their radii
+   * were smaller than the torso section they were supposed to sit on top of -
+   * they were entirely inside the body. Every ring here is the suit's own
+   * profile at that height plus ~1cm, which is the only way to guarantee a dark
+   * band actually appears.
+   *
+   * They are load-bearing for the read: without them the figure is one
+   * uninterrupted column of racer colour from collar to knee, and a cel ramp
+   * over a column gives you a slab. Dark at the hips and dark at the shoulders,
+   * racer colour at the ribs and the limbs.
+   */
   b.use(['pelvis', 'spine0']);
-  b.loft([{ y: 0.935, rx: 0.131, rz: 0.100 }, { y: 0.995, rx: 0.132, rz: 0.101 }], R_TORSO, false, false);
+  b.loft(
+    [
+      { y: 0.752, rx: 0.112, rz: 0.116, z: -0.014 },
+      { y: 0.845, rx: 0.132, rz: 0.131, z: -0.019 },
+      { y: 0.912, rx: 0.135, rz: 0.134, z: -0.016 },
+      { y: 0.958, rx: 0.127, rz: 0.130, z: -0.006 }, // waistband, standing proud
+    ],
+    R_TORSO, true, false,
+  );
 
   // Chest panel - the suit's dark bib. A tall narrow strip rather than a wide
   // rectangle: a wide one reads as a hole punched in the chest.
   b.use(['spine1', 'spine2']);
-  b.box(0, 1.150, 0.103, 0.055, 0.082, 0.018, 0.8, 0.85);
+  b.box(0, 1.150, 0.148, 0.055, 0.082, 0.018, 0.8, 0.85);
 
-  // Collar.
+  /*
+   * BACK PLATE. This is the fix for "flat orange slab": from the chase camera
+   * the rider is 90% back, and an unbroken field of suit colour across it has
+   * nothing for the eye to measure depth against. A concentric shell about
+   * 1.5-2.5cm proud of the torso, spanning the shoulder blades, cuts that field
+   * into a dark yoke over a lit lower back and gives the ink a second closed
+   * loop inside the silhouette.
+   *
+   * Radii are the chest section's, slightly grown; the phi window is clipped to
+   * where a sphere still runs outboard of the loft's actual profile, which is
+   * why it stops well short of the waist.
+   */
+  b.use(['spine1', 'spine2']);
+  b.sphere(0, 1.166, 0.010, 0.152, 0.185, 0.170, 10, 4,
+    Math.PI * 0.30, Math.PI * 0.58,
+    THREE.MathUtils.degToRad(128), THREE.MathUtils.degToRad(232));
+
+  // Shoulder pads over the deltoids. Hard dark caps: they carry the width of the
+  // silhouette, they mark where the arm leaves the body, and a dropped shoulder
+  // in the pose is only legible because there is a shape on it to drop.
+  for (const side of [1, -1]) {
+    const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
+    const S = side > 0 ? 'R' : 'L';
+    b.use([`clav${S}`, `upperArm${S}`, 'spine2']);
+    b.sphere(sh.x - side * 0.012, sh.y + 0.012, sh.z - 0.002, 0.096, 0.094, 0.092, 8, 3,
+      0, Math.PI * 0.54);
+  }
+
+  // Collar - a standing one, clear of the shoulder ring rather than sunk in it.
   b.use(['neck', 'spine2']);
-  b.loft([{ y: 1.283, rx: 0.093, rz: 0.083 }, { y: 1.345, rx: 0.084, rz: 0.075 }], R_TORSO, false, false);
+  b.loft(
+    [
+      { y: 1.276, rx: 0.120, rz: 0.116, z: 0.005 },
+      { y: 1.330, rx: 0.098, rz: 0.094, z: 0.004 },
+      { y: 1.372, rx: 0.088, rz: 0.084, z: 0.004 },
+    ],
+    R_TORSO, false, false,
+  );
 
   for (const side of [1, -1]) {
     const wr = armPoints(side)[2]!;
     const S = side > 0 ? 'R' : 'L';
     // Glove: a rounded mitt centred on the grip, not a brick hanging off the
     // wrist. The IK targets the wrist, so the ball has to sit where the hand
-    // closes around the bar.
+    // closes around the bar. Oversized on purpose - at 60px tall a correctly
+    // scaled hand is two pixels and the arm just ends.
     b.use([`foreArm${S}`, `hand${S}`]);
-    b.sphere(wr.x, wr.y - 0.040, wr.z + 0.012, 0.045, 0.052, 0.043, 6, 4);
+    b.sphere(wr.x, wr.y - 0.044, wr.z + 0.014, 0.053, 0.060, 0.051, 7, 4);
+    // Cuff, so the wrist is a joint and not a taper into a ball.
+    b.use([`foreArm${S}`, `hand${S}`]);
+    b.tube([wr.clone().add(_t.set(0, 0.030, 0)), wr.clone().add(_t.set(0, -0.012, 0))],
+      [0.046, 0.049], R_LIMB, 0, 0);
   }
 
   for (const side of [1, -1]) {
@@ -584,18 +705,40 @@ function buildGear(): THREE.BufferGeometry {
     const kn = p[1]!, an = p[2]!;
     const S = side > 0 ? 'R' : 'L';
     b.use([`thigh${S}`, `shin${S}`, `foot${S}`]);
-    b.tube([kn, an], [0.080, 0.058], R_LIMB, 0.5, 0.35);
-    // Knee pad - reads as armour and gives the knee a hard highlight when bent.
+    b.tube([kn, an], [0.078, 0.056], R_LIMB, 0.5, 0.35);
+    // Knee pad - reads as armour and gives the knee a hard highlight when bent,
+    // and from behind it is the only thing that says where the leg folds.
     b.use([`thigh${S}`, `shin${S}`]);
-    b.sphere(kn.x, kn.y, kn.z + 0.048, 0.060, 0.070, 0.048, 6, 3);
-    // Boot.
+    b.sphere(kn.x, kn.y, kn.z + 0.050, 0.064, 0.074, 0.052, 6, 3);
+    // Boot. Wider than the shin and running well forward of the ankle so the
+    // foot is a plane on the deck rather than a stump.
     b.use([`shin${S}`, `foot${S}`]);
-    b.box(an.x, an.y - 0.035, an.z + 0.032, 0.062, 0.046, 0.108, 0.72, 1);
+    b.box(an.x, an.y - 0.038, an.z + 0.040, 0.068, 0.048, 0.118, 0.72, 1);
   }
+
+  const hd = restHeadOf('head');
+
+  /*
+   * HELMET RIM, in the dark gear colour rather than the helmet's.
+   *
+   * Half the grid wears a lid in its own racer colour, and against a suit of the
+   * same colour the head was simply the top of one continuous mass - no neck, no
+   * edge, a thumb on a body. A dark band around the bottom of the shell reads as
+   * the helmet's lower edge from every angle and, crucially, does not depend on
+   * the racer's colour being lucky. The chin bar under the visor is the same
+   * trick from the front.
+   */
+  const hcy = hd.y + 0.062;
+  b.use(['head']);
+  b.sphere(hd.x, hcy, hd.z + 0.004, 0.135, 0.149, 0.139, 10, 2, Math.PI * 0.545, Math.PI * 0.655);
+  // Chin bar: a hard dark shape under the visor opening, front only.
+  b.use(['head']);
+  b.sphere(hd.x, hcy, hd.z + 0.004, 0.137, 0.151, 0.141, 6, 2,
+    Math.PI * 0.46, Math.PI * 0.60,
+    THREE.MathUtils.degToRad(-46), THREE.MathUtils.degToRad(46));
 
   // Hair: a nape mass under the helmet rim plus two short side locks. Enough to
   // stop the helmet reading as a bald sphere from behind.
-  const hd = restHeadOf('head');
   b.use(['head']);
   b.sphere(hd.x, hd.y + 0.035, hd.z - 0.052, 0.098, 0.092, 0.080, 6, 3);
   for (const side of [1, -1]) {
@@ -659,22 +802,45 @@ function buildVisor(): THREE.BufferGeometry {
 /** Scarf ribbon, skinned to the four scarf bones. */
 function buildScarf(): THREE.BufferGeometry {
   const b = new SkinBuilder();
-  b.use(['neck', 'scarf0', 'scarf1', 'scarf2', 'scarf3']);
+  b.use(['neck', ...SCARF_BONES]);
   const pts: THREE.Vector3[] = [];
   const w: number[] = [];
   const roll: number[] = [];
-  const chain = ['scarf0', 'scarf1', 'scarf2', 'scarf3'];
-  // Start at the nape, then one ring per bone head, then the final tail. Width
-  // tapers hard and the twist accumulates toward the tip, so the trailing end
-  // catches light on a different plane from the root.
-  const WIDTH = [0.062, 0.060, 0.053, 0.043, 0.030, 0.022];
-  const ROLL = [0, 0.12, 0.42, 0.85, 1.25, 1.55];
-  pts.push(new THREE.Vector3(0, restHeadOf('scarf0').y - 0.01, restHeadOf('scarf0').z + 0.055));
-  for (const n of chain) pts.push(restHeadOf(n).clone());
-  const last = restHeadOf('scarf3');
-  pts.push(new THREE.Vector3(last.x, last.y, last.z - 0.15));
-  for (let i = 0; i < pts.length; i++) { w.push(WIDTH[i]!); roll.push(ROLL[i]!); }
-  b.ribbon(pts, w, 0.009, roll);
+  /*
+   * Start at the nape, then TWO rings per link - one at the bone head and one
+   * mid-link. The extra ring is what buys the curve: a ring sitting exactly on a
+   * joint is skinned ~50/50 between the two bones and the segment between two of
+   * them is dead straight, so a one-ring-per-bone ribbon is a chain of rigid
+   * planks however hard the simulation whips it. Sampling between the joints
+   * lets the blend describe an arc.
+   *
+   * Width tapers hard and the twist accumulates toward the tip, so the trailing
+   * end catches light on a different plane from the root.
+   */
+  const nape = restHeadOf('scarf0');
+  pts.push(new THREE.Vector3(0, nape.y - 0.01, nape.z + 0.055));
+  for (let i = 0; i < SCARF_BONES.length; i++) {
+    const head = restHeadOf(SCARF_BONES[i]!);
+    const next = i + 1 < SCARF_BONES.length
+      ? restHeadOf(SCARF_BONES[i + 1]!)
+      : new THREE.Vector3(head.x, head.y, head.z - SCARF_TAIL);
+    pts.push(head.clone());
+    pts.push(head.clone().lerp(next, 0.5));
+  }
+  const last = restHeadOf(SCARF_BONES[SCARF_BONES.length - 1]!);
+  pts.push(new THREE.Vector3(last.x, last.y, last.z - SCARF_TAIL));
+
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1);
+    // Slight swell just past the neck, then a hard taper to a point.
+    const swell = 1 + 0.10 * Math.sin(Math.min(1, u * 3.2) * Math.PI);
+    w.push((0.060 * (1 - u) ** 1.25 + 0.016) * swell);
+    // Twist accelerates down the length; by the tip the ribbon is nearly edge-on
+    // to its own root, which is what stops a long scarf reading as one board.
+    roll.push(1.95 * u * u + 0.10 * u);
+  }
+  b.ribbon(pts, w, 0.010, roll);
   return b.build('rider_scarf');
 }
 

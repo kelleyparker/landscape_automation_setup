@@ -231,6 +231,8 @@ uniform float uScroll;
 uniform float uOpacity;
 /** Alpha fade with distance: x = start, y = gone. */
 uniform vec2  uFade;
+/** Near fade: x = fully gone at or under this view depth, y = fully in by this. */
+uniform vec2  uNearFade;
 /** 0 = racing line, 1 = start/finish strip. */
 uniform float uMode;
 /** Half-width of this mesh in metres, so the checker can be sized in metres. */
@@ -281,14 +283,14 @@ void main() {
   // exactly where the churn is, without ever being told where the churn is. A
   // dark band here does the opposite - it stains the foam grey, which is what
   // the old ink separator did.
-  vec3 line = uLine * 0.72;
-  line = mix(line, uLine * 0.88, mGlow);
-  line = mix(line, uLine, mBody);
-  line = mix(line, uHot * 1.02, arrow * mBody);
-  line = mix(line, uLine * 0.62, chevRule * mBody * 0.6);
+  vec3 line = uLine * 0.62;
+  line = mix(line, uLine * 0.84, mGlow);
+  line = mix(line, uLine * 1.12, mBody);
+  line = mix(line, uHot * 1.10, arrow * mBody);
+  line = mix(line, uLine * 0.58, chevRule * mBody * 0.7);
   // The core filament runs unbroken through the arrows, so the line still reads
   // as one continuous path at a glance rather than as a row of separate marks.
-  line = mix(line, uHot * 1.05, mCore);
+  line = mix(line, uHot * 1.25, mCore);
 
   // The line flares where the water is pinching itself together, i.e. exactly on
   // a crest. It is the same Jacobian the ocean's foam keys off, so the line
@@ -303,9 +305,16 @@ void main() {
   // off the same key light the water uses, then a smooth trough term from the
   // displaced height, so the line goes dark in the hollows and comes up on the
   // lit faces along with the band under it.
+  //
+  // The floors matter as much as the steps. At 0.78 * 0.88 the darkest state was
+  // 0.69 of the line's colour, and a stroke that loses a third of its value
+  // every time it crosses a trough is a stroke that visibly *stops* in the
+  // troughs - which is the dashed, patchy read this line had. The bands are now
+  // a lift off a much higher floor: the swell still runs along the line, but the
+  // line never drops far enough for the water to close over it.
   float ndl = dot(normalize(vWorldNormal), uSun);
-  float shade = 0.78 + 0.16 * wbCrisp(0.62, ndl, 0.5) + 0.18 * wbCrisp(0.86, ndl, 0.5);
-  shade *= 0.88 + 0.24 * smoothstep(-1.5, 1.3, vHeight);
+  float shade = 0.88 + 0.13 * wbCrisp(0.62, ndl, 0.5) + 0.14 * wbCrisp(0.86, ndl, 0.5);
+  shade *= 0.94 + 0.14 * smoothstep(-1.5, 1.3, vHeight);
   line *= shade;
 
   // ---------------------------------------------------- start/finish strip ---
@@ -322,16 +331,34 @@ void main() {
   // line a soft animated leading edge without a second draw call - and what
   // keeps the whole thing sitting *under* the wake instead of punching through
   // it in saturated blocks.
-  float lineAlpha = mEdge * (0.44 + 0.56 * mBody) * (0.86 + 0.30 * arrow * mBody);
+  // The sheath floor is 0.62, not 0.44: below about half the body weight the
+  // outer band stops carrying the line's width at any distance and the ribbon
+  // narrows to its core, which is the two-pixel scratch it used to be from
+  // altitude.
+  float lineAlpha = mEdge * (0.62 + 0.38 * mBody) * (0.90 + 0.22 * arrow * mBody);
   float alpha = mix(lineAlpha, mStrip, uMode) * uOpacity;
 
   // Fade out well before the fog does. A 2.7 km ribbon drawn all the way to the
   // horizon would be a bright stripe laid over the whole sea; it has to hand
   // over to the gates as the distance cue long before that.
   alpha *= 1.0 - smoothstep(uFade.x, uFade.y, vViewDepth);
+
+  // And fade *in*, which matters more than the far fade does.
+  //
+  // A 3.5 m ribbon seen from ten metres away at deck height is not a line at
+  // all - it is foreshortened into a wedge tens of degrees wide that fills the
+  // bottom third of the frame, and it lands precisely on the boat's own wake,
+  // so the wake foam cuts it into exactly the field of disconnected green
+  // islands this line is meant not to be. It is also useless there: guidance is
+  // about where you are going, and the water beside the hull is where you
+  // already are. Letting it arrive over the next twenty-odd metres costs
+  // nothing a driver reads and takes the whole artefact out of the frame.
+  alpha *= smoothstep(uNearFade.x, uNearFade.y, vViewDepth);
   if (alpha < 0.004) discard;
 
-  col = mix(col, uFogColor, wbFog(vViewDepth) * 0.85);
+  // 0.85 of a haze tuned for two-pixel pylons washed the ribbon to the horizon
+  // colour by 600 m; on the line's own long range this only ever softens it.
+  col = mix(col, uFogColor, wbFog(vViewDepth) * 0.72);
 
   gColor = vec4(col, alpha);
   // edgeMask = 0. Under SRC_ALPHA blending this leaves attachment 1 untouched,

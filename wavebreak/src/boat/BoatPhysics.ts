@@ -208,28 +208,65 @@ const BOOST_MIN = 0.02;
  * the cowl all sit well above the waterline and a bare beam term rolls like a log.
  */
 const INERTIA_PITCH = 1.55;
-const INERTIA_ROLL = 0.42;
+const INERTIA_ROLL = 0.40;
 /** Extra rate damping on top of what the buoyancy dampers already provide. */
 const PITCH_DAMP = 1.9;
-const ROLL_DAMP = 2.2;
+const ROLL_DAMP = 2.0;
 /** Squat under power: the bow lifts as the jet pushes, rad/s^2 at full thrust. */
-const TRIM_ACCEL = 1.15;
+const TRIM_ACCEL = 2.0;
 /**
- * Pitch authority while airborne, rad/s^2, against a self-levelling spring.
- * Holding throttle settles the hull at AIR_PITCH / AIR_LEVEL = 0.32 rad nose
- * down - a clean entry attitude - and letting go brings it back level, so a
- * player who does nothing lands flat rather than tumbling. Without the spring the
- * rate integrates for the whole flight and the boat arrives vertical.
+ * Planing trim, rad/s^2 at top speed, scaling with the square of speed.
+ *
+ * The hull's own hydrostatics settle it about 3 degrees bow-down (see the probe
+ * table in `Buoyancy`) - correct for a displacement hull sitting still, and
+ * completely wrong for a race boat at 30 m/s, where the whole point is that the
+ * bottom is generating lift aft of the centre of mass and the nose is up. Left
+ * alone the boat ploughed through the entire race at 10 degrees nose-down, which
+ * is what made four boats on a rolling sea read as four boats on a flat one: a
+ * hull that is always at the same wrong angle has no attitude to read.
+ *
+ * Against the pitch stiffness the probe table produces (about 92 rad/s^2 per
+ * radian, but far less than that once the bow probe lifts clear) 6.5 measures out
+ * at about 5 degrees of bow-up on the shipped course - level through the troughs,
+ * standing on its pad down the straights. It was 17 for one tuning pass, which
+ * pinned the hull against its own pitch limit for most of a lap: past the point
+ * where the forefoot leaves the water there is nothing left to restore it.
  */
-const AIR_PITCH = 1.6;
-const AIR_LEVEL = 5.0;
-/** Attitude limits. Past these the boat has stopped being a boat. */
-const MAX_PITCH = 0.75;
-const MAX_ROLL = 0.85;
+const PLANE_TRIM = 6.5;
+/**
+ * Dynamic lift off the planing surfaces, m/s^2 at top speed, likewise quadratic.
+ *
+ * It takes a third of the hull's weight off the buoyancy at racing speed, so the
+ * boat rides high and light on a crest and settles deep the instant it loses
+ * speed in a trough. That feeds straight back into the immersion-scaled drag
+ * term, which is where the surge over a swell comes from.
+ */
+const PLANE_LIFT = 5.0;
+/**
+ * Pitch authority while airborne, rad/s^2, against a self-levelling spring that
+ * pulls toward AIR_TRIM rather than toward flat.
+ *
+ * A boat coming off a crest with nothing held should arrive nose-high; that is
+ * the pose the whole jump reads from, and the old spring drove it to 18 degrees
+ * nose-down every single time. Now: hands off settles at AIR_TRIM (7 degrees
+ * bow-up, a ballistic arc), and holding throttle drives it through to 7 degrees
+ * nose-down for a clean knifing entry. The player picks the landing.
+ */
+const AIR_PITCH = 1.0;
+const AIR_LEVEL = 4.2;
+const AIR_TRIM = -0.12;
+/**
+ * Attitude limits. Past these the boat has stopped being a boat - and the roll
+ * limit in particular is a *look* decision, not a safety net: 49 degrees of heel
+ * on a hull with sponsons either side reads as capsizing, and it was reachable
+ * whenever a wave face lined up with a committed corner.
+ */
+const MAX_PITCH = 0.62;
+const MAX_ROLL = 0.60;
 /** Bank into the turn, radians at full steer and full speed. */
-const LEAN_STEER = 0.30;
+const LEAN_STEER = 0.26;
 /** Extra outboard lean from raw slip, so a powerslide visibly heels. */
-const LEAN_SLIP = 0.16;
+const LEAN_SLIP = 0.14;
 /** Stiffness of the spring that pulls roll toward the commanded lean. */
 const LEAN_STIFF = 9.0;
 
@@ -259,8 +296,8 @@ const HIT_YAW = 2.2;
 
 // ------------------------------------------------------------------ foam -----
 
-/** Half-beam the wake ribbon starts at, before speed widens it. */
-const WAKE_HALF_BEAM = 0.72;
+/** Half-beam the wake ribbon starts at, before speed widens it. Sponson to sponson. */
+const WAKE_HALF_BEAM = 0.86;
 const WAKE_MIN_SPEED = 0.5;
 /** Bow immersion above which the entry is punching through, not slicing. */
 const BOW_PUNCH = 0.82;
@@ -488,7 +525,9 @@ export class BoatPhysics {
         // Slam the nose down a little, whichever way it came in. Small: the
         // buoyancy torque from a half-buried bow is already the dominant term,
         // and stacking a large impulse on top of it flips the boat end over end.
-        this.pitchRate += impact * 0.9;
+        // Smaller than it was, because the hull now arrives nose-high by default
+        // and a big kick simply cancelled the pose the jump was for.
+        this.pitchRate += impact * 0.55;
         this.emitLandingSpray(impact);
       }
       // Most of the vertical momentum goes into the splash rather than into
@@ -632,18 +671,23 @@ export class BoatPhysics {
     st.velocity.z += b.flow.z * FLOW_PUSH * wet * h;
 
     // --- heave -------------------------------------------------------------
-    st.velocity.y += (b.lift - GRAVITY) * h;
+    // Planing lift is gated on the aft hull being wet for the same reason thrust
+    // is: a bottom in mid-air is not generating anything.
+    const plane = speedFrac * speedFrac * jet;
+    st.velocity.y += (b.lift + PLANE_LIFT * plane - GRAVITY) * h;
     st.position.x += st.velocity.x * h;
     st.position.y += st.velocity.y * h;
     st.position.z += st.velocity.z * h;
 
     // --- pitch -------------------------------------------------------------
     this.pitchRate += (b.pitchTorque / INERTIA_PITCH) * h;
-    // Squat: thrust lifts the bow. Negative pitch is nose-up.
+    // Squat: thrust lifts the bow, and so does the pad once the boat is planing.
+    // Negative pitch is nose-up.
     this.pitchRate -= TRIM_ACCEL * (thrust / THRUST_MAX) * wet * h;
+    this.pitchRate -= PLANE_TRIM * plane * h;
     if (airborne) {
       this.pitchRate += AIR_PITCH * inp.throttle * h;
-      this.pitchRate -= st.pitch * AIR_LEVEL * h;
+      this.pitchRate -= (st.pitch - AIR_TRIM) * AIR_LEVEL * h;
     }
     this.pitchRate -= this.pitchRate * PITCH_DAMP * h;
     st.pitch += this.pitchRate * h;
