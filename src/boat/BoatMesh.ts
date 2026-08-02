@@ -59,41 +59,86 @@ import { addOutlineRecursive } from '../render/OutlineHull';
 const NEUTRAL = new THREE.Color(1, 1, 1);
 
 /**
- * Ten stations from transom to stem. Spacing tightens forward, where the section
- * changes fastest - an even spread puts the same number of rings under the flat
- * planing pad, which needs almost none, as under the entry, which needs them all.
+ * Eleven stations from transom to stem. Spacing tightens forward, where the
+ * section changes fastest - an even spread puts the same number of rings under
+ * the flat planing pad, which needs almost none, as under the entry, which needs
+ * them all.
  */
-const ST_Z: readonly number[] =     [-2.10, -1.62, -1.10, -0.55, 0.00, 0.52, 1.00, 1.42, 1.78, 2.10];
+const ST_Z: readonly number[] =     [-2.12, -1.72, -1.28, -0.76, -0.20,  0.36,  0.88,  1.34,  1.72,  2.00,  2.20];
 /** Chine half-width. Max beam sits just forward of the transom, as it does on a real hull. */
-const ST_HB: readonly number[] =    [ 0.72,  0.78,  0.80,  0.80, 0.78, 0.72, 0.62, 0.47, 0.28, 0.05];
+const ST_HB: readonly number[] =    [ 0.74,  0.80,  0.83,  0.84,  0.83,  0.79,  0.71,  0.58,  0.42,  0.24,  0.05];
 /** Keel line. y = 0 is the design waterline, so these are draughts. */
-const ST_KEEL: readonly number[] =  [-0.30, -0.34, -0.36, -0.36,-0.34,-0.30,-0.24,-0.15,-0.04, 0.12];
-/** Chine line. (chine - keel) is the deadrise: 0.10 m aft, 0.27 m forward. */
-const ST_CHINE: readonly number[] = [-0.20, -0.21, -0.20, -0.17,-0.12,-0.05, 0.03, 0.12, 0.22, 0.32];
-/** Sheer line, rising toward the bow so the boat has a lifted nose in profile. */
-const ST_DECK: readonly number[] =  [ 0.30,  0.32,  0.34,  0.36, 0.38, 0.40, 0.43, 0.46, 0.49, 0.52];
+const ST_KEEL: readonly number[] =  [-0.30, -0.34, -0.37, -0.38, -0.37, -0.34, -0.29, -0.21, -0.11,  0.01,  0.16];
+/**
+ * Chine line, and with it the deadrise `(chine - keel)`: 0.32 m across a 0.74 m
+ * half-beam aft, 0.40 m across 0.42 m forward. Aft that is a shallow lift into
+ * the chine off a flat pad; forward it is a 50-degree entry.
+ *
+ * It also sits *above* the waterline for the whole length. That is the single
+ * most important number in this file: a chine below the surface is a hard edge
+ * nobody ever sees, and it was why the hull used to read as a slab.
+ */
+const ST_CHINE: readonly number[] = [ 0.02,  0.00, -0.01,  0.00,  0.02,  0.06,  0.12,  0.20,  0.29,  0.38,  0.47];
+/**
+ * Sheer line. Not a ramp: it dips through the cockpit and sweeps hard up to the
+ * stem, which is the curve the eye actually uses to tell a boat from a box.
+ */
+const ST_DECK: readonly number[] =  [ 0.40,  0.375, 0.360, 0.355, 0.365, 0.39,  0.43,  0.49,  0.57,  0.65,  0.73];
 /**
  * Bottom-section exponent. `y = keel + deadrise * t^p` across the half-beam:
  * p = 1 is a straight V, and the larger p gets the flatter the middle of the
- * section runs before it turns up to the chine. 2.6 at the transom is the planing
- * pad; 1.15 at the stem is a fine entry that slices instead of slapping.
+ * section runs before it turns up to the chine. 3.0 at the transom is the planing
+ * pad; 1.12 at the stem is a fine entry that slices instead of slapping.
  */
-const ST_VEE: readonly number[] =   [ 2.60,  2.50,  2.35,  2.15, 1.95, 1.75, 1.55, 1.38, 1.24, 1.15];
-/** Topside flare: how far the sheer stands outboard of the chine. */
-const ST_FLARE: readonly number[] = [ 1.00,  1.01,  1.02,  1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.06];
+const ST_VEE: readonly number[] =   [ 3.00,  2.85,  2.65,  2.40,  2.15,  1.90,  1.68,  1.48,  1.32,  1.20,  1.12];
+/**
+ * Spray-rail knuckle, as a multiple of the chine half-beam. This is the widest
+ * point of the hull, a hand's breadth above the chine, and the crease between the
+ * two topside planes.
+ */
+const ST_KNUCK: readonly number[] = [ 1.05,  1.06,  1.07,  1.07,  1.07,  1.07,  1.06,  1.05,  1.04,  1.03,  1.01];
+/**
+ * Sheer half-width, as a multiple of the chine half-beam. Under 1 throughout:
+ * the deck is *narrower* than the hull, so the topside leans inboard as it rises.
+ * Tumblehome is what turns a vertical wall into a plane that takes its own band
+ * off the ramp, and it is most of the difference between this and a crate.
+ */
+const ST_FLARE: readonly number[] = [ 0.88,  0.885, 0.89,  0.895, 0.90,  0.91,  0.925, 0.945, 0.965, 0.985, 1.00];
+/**
+ * Longitudinal rake, in metres, applied to a station in proportion to how far
+ * *down* the section a point sits: 0 at the sheer, the full value at the keel.
+ *
+ * Positive pushes the bottom forward, which is a transom that overhangs its own
+ * planing pad; negative pushes it aft, which is a stem that leans out over the
+ * water. Both are pure silhouette - a vertical transom and a vertical stem are
+ * exactly the two edges that made the old hull read as an extruded prism.
+ *
+ * The offset is linear in y, so a raked station is still a plane and the end caps
+ * stay exactly planar.
+ */
+const ST_RAKE: readonly number[] =  [ 0.30,  0.09,  0.00,  0.00,  0.00,  0.00,  0.00,  0.00, -0.10, -0.22, -0.34];
 
 /** Bottom sample parameters, chine (1) to keel (0). Four segments per half. */
 const BOTTOM_T: readonly number[] = [1.0, 0.72, 0.44, 0.20, 0.0];
 
-/** Profile length: 7 points per side plus the shared keel point. */
-const HULL_PROFILE_N = 15;
-/** Profile segments spanning the duplicated chine point; skipped by the loft. */
+/** Profile length: 8 points per side plus the shared keel point. */
+const HULL_PROFILE_N = 17;
+/**
+ * Profile segments spanning a duplicated crease point; skipped by the loft so
+ * `computeVertexNormals` cannot average across them. Two creases per side now -
+ * the knuckle as well as the chine - which is what gives the topside its
+ * interior ink line for the Sobel pass to find.
+ */
 const HULL_SKIP: readonly boolean[] = (() => {
   const s = new Array<boolean>(HULL_PROFILE_N - 1).fill(false);
-  s[2] = true;   // port chine: topside copy -> bottom copy
-  s[11] = true;  // starboard chine
+  s[1] = true;   // port knuckle:  upper topside -> lower topside
+  s[3] = true;   // port chine:    topside -> bottom
+  s[12] = true;  // starboard chine
+  s[14] = true;  // starboard knuckle
   return s;
 })();
+/** Duplicate copies, dropped when the profile is walked as a closed outline. */
+const HULL_DUP: readonly number[] = [2, 4, 12, 14];
 
 /** Deck crown at the centreline, tapering to zero at the sheer. */
 const DECK_CROWN = 0.05;
@@ -120,14 +165,39 @@ const HANDLE_LOCAL_Z = -0.14;
  * hundred metres, where the racer colour is two or three pixels wide - so the
  * differences that matter are the ones that change the *outline*.
  */
-const FIN_HEIGHT: readonly number[] = [0.34, 0.52, 0.24, 0.43];
-const FIN_SWEEP: readonly number[] = [0.16, 0.32, 0.05, 0.24];
+interface FinSpec {
+  /** Blades. Two short blades and one tall one are different animals at 100 m. */
+  count: number;
+  /** Half the gap between blades when there are two. */
+  spread: number;
+  height: number;
+  chord: number;
+  /** Aft lean of the tip, in metres. */
+  sweep: number;
+  /** Root station on the engine cowl. */
+  z: number;
+  /** Half-span of a tailplane across the tips; 0 for none. */
+  tailSpan: number;
+}
+
+/**
+ * Per-slot tail. The spread between these is deliberately extreme - the previous
+ * set varied only height and sweep, by less than the width of the ink line at
+ * racing distance, so all four boats had the same outline.
+ */
+const FIN: readonly FinSpec[] = [
+  { count: 1, spread: 0,    height: 0.52, chord: 0.38, sweep: 0.20, z: -1.44, tailSpan: 0 },
+  { count: 1, spread: 0,    height: 0.86, chord: 0.24, sweep: 0.44, z: -1.34, tailSpan: 0 },
+  { count: 2, spread: 0.23, height: 0.30, chord: 0.46, sweep: 0.04, z: -1.50, tailSpan: 0 },
+  { count: 2, spread: 0.17, height: 0.62, chord: 0.26, sweep: 0.30, z: -1.40, tailSpan: 0.24 },
+];
+
 /** [halfSpan, chord, tipRise, anhedral, tipSweep] for the bow spoiler. */
 const SPOILER: readonly (readonly number[])[] = [
-  [0.46, 0.30, 0.055, 0.000, 0.05], // P1 broad straight blade
-  [0.38, 0.42, 0.150, 0.020, 0.16], // P2 narrow swept delta, tips up
-  [0.54, 0.24, 0.000, 0.070, 0.02], // P3 wide anhedral plank
-  [0.43, 0.34, 0.105, -0.045, 0.10], // P4 gulled mid-span
+  [0.40, 0.32, 0.070, 0.000, 0.04], // P1 broad straight blade
+  [0.27, 0.46, 0.230, 0.010, 0.26], // P2 narrow swept delta, tips well up
+  [0.52, 0.22, 0.000, 0.130, 0.00], // P3 wide anhedral plank
+  [0.33, 0.36, 0.150, -0.110, 0.12], // P4 gulled mid-span
 ];
 
 // ---------------------------------------------------------------- helpers ----
@@ -309,27 +379,44 @@ class Mesher {
 // ------------------------------------------------------------- hull parts ----
 
 /**
+ * Where a point at height `y` on station `s` actually sits along Z once the
+ * station's rake is applied. See ST_RAKE.
+ */
+function rakeZ(s: number, y: number): number {
+  const r = ST_RAKE[s]!;
+  if (r === 0) return ST_Z[s]!;
+  const deck = ST_DECK[s]!;
+  return ST_Z[s]! + r * ((deck - y) / (deck - ST_KEEL[s]!));
+}
+
+/** Knuckle height: a fixed fraction of the freeboard above the chine. */
+const KNUCK_RISE = 0.26;
+
+/**
  * One hull cross-section, port sheer -> keel -> starboard sheer.
  *
- * The chine point appears twice (indices 2/3 and 11/12) so the loft can leave a
- * hard edge there; see HULL_SKIP.
+ * Eight points a side. Two of them are duplicates - the knuckle and the chine -
+ * so the loft can leave a hard edge at each; see HULL_SKIP. The three planes they
+ * separate are the tumblehome topside, the spray-rail band and the bottom, and
+ * they take three different bands off the ramp, which is the whole point.
  */
 function hullProfile(s: number): number[] {
-  const z = ST_Z[s]!;
   const hb = ST_HB[s]!;
   const keel = ST_KEEL[s]!;
   const chine = ST_CHINE[s]!;
   const deck = ST_DECK[s]!;
   const vee = ST_VEE[s]!;
-  const flare = ST_FLARE[s]!;
   const dead = chine - keel;
+  const knuckY = chine + (deck - chine) * KNUCK_RISE;
+  const knuckX = hb * ST_KNUCK[s]!;
+  const sheerX = hb * ST_FLARE[s]!;
   const out: number[] = [];
 
   const side = (sgn: number, down: boolean): void => {
     const pts: number[][] = [];
-    // Topside: chine out and up to the sheer, with a slight outward belly.
-    pts.push([sgn * hb * flare, deck]);
-    pts.push([sgn * hb * (1 + (flare - 1) * 0.55) * 1.012, chine + (deck - chine) * 0.52]);
+    pts.push([sgn * sheerX, deck]);           // sheer, inboard of the knuckle
+    pts.push([sgn * knuckX, knuckY]);         // knuckle, upper copy
+    pts.push([sgn * knuckX, knuckY]);         // knuckle, lower copy (hard crease)
     pts.push([sgn * hb, chine]);              // chine, topside copy
     pts.push([sgn * hb, chine]);              // chine, bottom copy (hard crease)
     for (let i = 1; i < BOTTOM_T.length - 1; i++) {
@@ -337,23 +424,23 @@ function hullProfile(s: number): number[] {
       pts.push([sgn * hb * t, keel + dead * Math.pow(t, vee)]);
     }
     if (!down) pts.reverse();
-    for (const p of pts) out.push(p[0]!, p[1]!, z);
+    for (const p of pts) out.push(p[0]!, p[1]!, rakeZ(s, p[1]!));
   };
 
-  side(-1, true);                 // port, sheer -> keel
-  out.push(0, keel, z);           // shared keel point
-  side(1, false);                 // starboard, keel -> sheer
+  side(-1, true);                            // port, sheer -> keel
+  out.push(0, keel, rakeZ(s, keel));         // shared keel point
+  side(1, false);                            // starboard, keel -> sheer
   return out;
 }
 
 /** One deck cross-section, starboard -> port so the crown faces +Y. */
 function deckProfile(s: number): number[] {
-  const z = ST_Z[s]!;
-  const hb = ST_HB[s]!* ST_FLARE[s]!;
+  const hb = ST_HB[s]! * ST_FLARE[s]!;
   const base = ST_DECK[s]!;
   const out: number[] = [];
   for (const u of DECK_U) {
-    out.push(u * hb, base + DECK_CROWN * (1 - u * u) - wellDepth(z, u), z);
+    const y = base + DECK_CROWN * (1 - u * u) - wellDepth(ST_Z[s]!, u);
+    out.push(u * hb, y, rakeZ(s, y));
   }
   return out;
 }
@@ -367,9 +454,34 @@ function wellDepth(z: number, u: number): number {
   return WELL_DEPTH * smooth01(1 - rr);
 }
 
-/** Deck surface height at (station, u) - used by the livery stripes. */
+/** Deck surface height at (station, u) - used by the livery rails. */
 function deckY(s: number, u: number): number {
   return ST_DECK[s]! + DECK_CROWN * (1 - u * u) - wellDepth(ST_Z[s]!, u);
+}
+
+/**
+ * Linear interpolation of a station table at an arbitrary z. Only the cockpit
+ * coaming needs it - everything else in the file is built station by station -
+ * so a scan is cheaper than any structure that would make it a lookup.
+ */
+function stationAt(table: readonly number[], z: number): number {
+  if (z <= ST_Z[0]!) return table[0]!;
+  const n = ST_Z.length;
+  if (z >= ST_Z[n - 1]!) return table[n - 1]!;
+  let i = 0;
+  while (i + 2 < n && ST_Z[i + 1]! < z) i++;
+  const t = (z - ST_Z[i]!) / (ST_Z[i + 1]! - ST_Z[i]!);
+  return table[i]! + (table[i + 1]! - table[i]!) * t;
+}
+
+/** Deck surface height at an arbitrary (z, u). */
+function deckYAt(z: number, u: number): number {
+  return stationAt(ST_DECK, z) + DECK_CROWN * (1 - u * u) - wellDepth(z, u);
+}
+
+/** Deck half-width at an arbitrary z. */
+function deckHalfAt(z: number): number {
+  return stationAt(ST_HB, z) * stationAt(ST_FLARE, z);
 }
 
 function buildHullGroup(): THREE.BufferGeometry {
@@ -413,7 +525,7 @@ function buildHullGroup(): THREE.BufferGeometry {
 function capOutline(hull: number[], deck: number[]): number[] {
   const out: number[] = [];
   for (let i = 0; i < HULL_PROFILE_N; i++) {
-    if (i === 3 || i === 12) continue; // second copy of each chine point
+    if (HULL_DUP.includes(i)) continue; // second copy of each crease point
     out.push(hull[i * 3]!, hull[i * 3 + 1]!, hull[i * 3 + 2]!);
   }
   // Deck runs starboard -> port; the hull ended at starboard, so walk it forward
@@ -425,16 +537,35 @@ function capOutline(hull: number[], deck: number[]): number[] {
   return out;
 }
 
-/** Sponson stations: z, outer x, inner x, top y, bottom y. */
-const SPON_Z: readonly number[] =     [0.15, 0.55, 0.95, 1.30, 1.62];
-const SPON_OUT: readonly number[] =   [0.86, 0.94, 0.96, 0.90, 0.74];
-const SPON_IN: readonly number[] =    [0.70, 0.74, 0.72, 0.64, 0.52];
-const SPON_TOP: readonly number[] =   [0.02, 0.06, 0.11, 0.18, 0.27];
-const SPON_BOT: readonly number[] =   [-0.16, -0.14, -0.10, -0.02, 0.11];
+/**
+ * Sponson stations: z, outer x, inner x, top y, bottom y.
+ *
+ * The outer edge stands 0.20 m proud of the hull's knuckle for almost the whole
+ * length and the bottom hangs below the chine, so from astern the boat has three
+ * distinct masses at the waterline instead of one wall, and from the beam the
+ * hull has a hard shadow line under its own shoulder. The inner face is buried
+ * inside the topside at every station - a pod with daylight under it reads as a
+ * wing that fell off, not as a sponson.
+ *
+ * The first pass at these stood 0.10 proud and stopped short of the transom, and
+ * in a captured frame they were simply not there: at ten pixels of hull height,
+ * ten centimetres of relief is nothing, and a boat seen from behind only shows
+ * you what reaches its transom.
+ */
+const SPON_Z: readonly number[] =     [-2.02, -1.40, -0.70,  0.10,  0.85,  1.45,  1.80];
+const SPON_OUT: readonly number[] =   [ 0.90,  1.06,  1.10,  1.08,  0.96,  0.74,  0.50];
+const SPON_IN: readonly number[] =    [ 0.70,  0.80,  0.82,  0.80,  0.68,  0.50,  0.32];
+const SPON_TOP: readonly number[] =   [ 0.110, 0.085, 0.085, 0.110, 0.185, 0.290, 0.375];
+const SPON_BOT: readonly number[] =   [-0.120,-0.140,-0.130,-0.090,-0.010, 0.120, 0.240];
 
 /**
  * The two outboard pods. Their outer edges carry the boat when it leans, and
  * they are most of what the eye reads as "hydroplane" from the bow.
+ *
+ * Six points a section rather than five: a flat outer cheek, a flat bottom pad
+ * and a hard chine between them. Every one of those corners is a crease the
+ * Sobel pass can ink, and the pad is the surface the boat is supposed to be
+ * standing on.
  *
  * Profile order is counter-clockwise about +X for the starboard pod (rings
  * advance +Z), mirrored for port - the mirror flips the handedness, so the port
@@ -449,13 +580,13 @@ function buildSponsons(m: Mesher, c: THREE.Color): void {
       const inn = SPON_IN[i]!;
       const top = SPON_TOP[i]!;
       const bot = SPON_BOT[i]!;
-      const mid = (top + bot) * 0.5;
       const loop: number[][] = [
-        [o, mid],                       // outboard edge
-        [o * 0.95, top],                // outboard shoulder
-        [inn, top + 0.02],              // inboard top, tucked against the hull
-        [inn, bot + 0.05],              // inboard bottom
-        [o * 0.95, bot],                // outboard chine
+        [o, top - (top - bot) * 0.30],  // outboard cheek, widest point
+        [o * 0.93, top],                // outboard top corner
+        [inn, top + 0.03],              // inboard top, tucked against the hull
+        [inn, bot + 0.07],              // inboard bottom
+        [o * 0.78, bot],                // pad inner edge
+        [o * 0.98, bot + 0.05],         // outer chine of the pad
       ];
       if (sgn < 0) loop.reverse();
       const ring: number[] = [];
@@ -480,54 +611,185 @@ interface ShellStation { z: number; hw: number; base: number; top: number; }
  *
  * Ordered starboard -> port so that with rings advancing +Z the top faces up.
  */
-function shellRing(st: ShellStation, n = 9): number[] {
+function shellRing(st: ShellStation, exp: number, creases: readonly number[], n = 9): number[] {
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
     const phi = (i / (n - 1)) * Math.PI;             // 0 = starboard, pi = port
-    out.push(
-      st.hw * Math.cos(phi),
-      st.base + (st.top - st.base) * Math.pow(Math.sin(phi), 0.55),
-      st.z,
-    );
+    const x = st.hw * Math.cos(phi);
+    const y = st.base + (st.top - st.base) * Math.pow(Math.sin(phi), exp);
+    out.push(x, y, st.z);
+    // A crease is a second copy of the same point, exactly as on the hull: the
+    // loft skips the zero-width quad between the two and `computeVertexNormals`
+    // then has no way to average the panels either side together. Without them a
+    // cowl is a smooth arch, the ramp puts one soft band across the whole of it,
+    // and the Sobel pass finds no interior edge to draw.
+    if (creases.indexOf(i) >= 0) out.push(x, y, st.z);
   }
   return out;
 }
 
+/** Segments of a creased shell ring that the loft must leave open. */
+function shellSkip(creases: readonly number[], n = 9): boolean[] {
+  const skip: boolean[] = [];
+  let p = 0;
+  for (let i = 0; i < n; i++) {
+    const dup = creases.indexOf(i) >= 0;
+    if (dup) { skip[p] = true; p += 2; } else { skip[p] = false; p += 1; }
+  }
+  return skip;
+}
+
+/** Shoulder creases, and for the nose a ridge along the crown as well. */
+const FORE_CREASE: readonly number[] = [2, 4, 6];
+const AFT_CREASE: readonly number[] = [2, 6];
+
+/**
+ * Forward cowling. It clears the sheer by 0.44 m at the screen and carries the
+ * whole nose - the sheer sweeps up to meet it, so from 3/4 the boat has a raised
+ * spine running from the windscreen to the stem rather than a flat lid.
+ */
 const FORE_COWL: readonly ShellStation[] = [
-  { z: 0.86, hw: 0.40, base: 0.41, top: 0.80 },
-  { z: 1.16, hw: 0.40, base: 0.43, top: 0.82 },
-  { z: 1.46, hw: 0.36, base: 0.45, top: 0.79 },
-  { z: 1.72, hw: 0.28, base: 0.47, top: 0.71 },
-  { z: 1.92, hw: 0.15, base: 0.50, top: 0.58 },
+  { z: 0.80, hw: 0.37, base: 0.38, top: 0.84 },
+  { z: 1.12, hw: 0.37, base: 0.42, top: 0.90 },
+  { z: 1.44, hw: 0.33, base: 0.47, top: 0.90 },
+  { z: 1.72, hw: 0.26, base: 0.53, top: 0.84 },
+  { z: 1.96, hw: 0.15, base: 0.61, top: 0.73 },
 ];
 
+/**
+ * Engine cowl. Squarer shoulders than the nose - it is a box with a lid on it.
+ * Both cowls are narrower than they look like they should be, on purpose: they
+ * are the only dark mass on the boat, and at the width the first pass gave them
+ * they covered so much deck that the racer's own colour was down to a stripe.
+ */
 const AFT_COWL: readonly ShellStation[] = [
-  { z: -1.98, hw: 0.34, base: 0.300, top: 0.56 },
-  { z: -1.62, hw: 0.42, base: 0.315, top: 0.66 },
-  { z: -1.20, hw: 0.46, base: 0.335, top: 0.70 },
-  { z: -0.86, hw: 0.44, base: 0.355, top: 0.68 },
-  { z: -0.62, hw: 0.40, base: 0.375, top: 0.62 },
+  { z: -2.06, hw: 0.32, base: 0.36, top: 0.64 },
+  { z: -1.74, hw: 0.40, base: 0.35, top: 0.76 },
+  { z: -1.32, hw: 0.43, base: 0.34, top: 0.80 },
+  { z: -0.96, hw: 0.41, base: 0.34, top: 0.78 },
+  { z: -0.68, hw: 0.36, base: 0.35, top: 0.68 },
 ];
 
 /** Windscreen rows, bottom to top. The tips sweep aft so the screen wraps. */
-const SCREEN_HW: readonly number[] = [0.36, 0.34, 0.30];
-const SCREEN_Y: readonly number[] = [0.72, 0.845, 0.94];
-const SCREEN_Z: readonly number[] = [0.90, 0.845, 0.78];
-const SCREEN_WRAP: readonly number[] = [0.18, 0.20, 0.22];
+const SCREEN_HW: readonly number[] = [0.40, 0.37, 0.32];
+const SCREEN_Y: readonly number[] = [0.84, 0.97, 1.07];
+const SCREEN_Z: readonly number[] = [0.83, 0.77, 0.70];
+const SCREEN_WRAP: readonly number[] = [0.20, 0.22, 0.24];
 const SCREEN_COLS = 11;
+
+/** Cockpit coaming: outer/inner offsets from the footwell edge, and its height. */
+const COAM_STEPS = 22;
+const COAM_LIFT = 0.075;
+const COAM_WALL = 0.055;
+
+/**
+ * The lip round the footwell. Purely a silhouette part: it is the only thing on
+ * the deck with a vertical face, so it is the only thing on the deck that takes a
+ * different band from everything around it and draws its own ink line.
+ *
+ * Swept as a closed loop, so the profile (outer-bottom -> outer-top -> inner-top
+ * -> inner-bottom) has to be ordered against the direction the loop advances. The
+ * loop runs clockwise seen from above (theta increasing puts +z first, then -x),
+ * so listing the outer edge first puts the outward faces outward.
+ */
+function buildCoaming(m: Mesher, c: THREE.Color): void {
+  const rings: number[][] = [];
+  for (let i = 0; i <= COAM_STEPS; i++) {
+    const th = (i / COAM_STEPS) * Math.PI * 2;
+    const cz = Math.cos(th);
+    const su = Math.sin(th);
+    const zc = WELL_Z + WELL_HALF_L * 0.94 * cz;
+    const uc = WELL_HALF_U * 0.94 * su;
+    // Outward normal of the ellipse in (z, u), used to give the lip its width.
+    const nz = cz / WELL_HALF_L;
+    const nu = su / WELL_HALF_U;
+    const nl = Math.hypot(nz, nu) || 1;
+    const oz = zc + (nz / nl) * COAM_WALL;
+    const ou = uc + (nu / nl) * COAM_WALL;
+    const iz = zc - (nz / nl) * COAM_WALL;
+    const iu = uc - (nu / nl) * COAM_WALL;
+    const oy = deckYAt(oz, ou);
+    const iy = deckYAt(iz, iu);
+    rings.push([
+      ou * deckHalfAt(oz), oy - 0.03, oz,
+      ou * deckHalfAt(oz), oy + COAM_LIFT, oz,
+      iu * deckHalfAt(iz), iy + COAM_LIFT * 0.72, iz,
+      iu * deckHalfAt(iz), iy - 0.06, iz,
+    ]);
+  }
+  m.loft(rings, c, false);
+}
+
+/**
+ * Engine intakes: a wedge scoop on each shoulder of the aft cowl. Four planes and
+ * a mouth, which at this scale is all an intake ever needs to be - and it gives
+ * the cowl a break in a place where the eye otherwise slides over a smooth arch.
+ */
+function buildIntakes(m: Mesher, c: THREE.Color): void {
+  for (const sgn of [1, -1]) {
+    const rings: number[][] = [];
+    // z from the mouth (aft, open) forward to where it fairs into the cowl.
+    const steps: readonly (readonly number[])[] = [
+      // [z, xOuter, xInner, yTop, yBottom]
+      [-1.62, 0.415, 0.300, 0.700, 0.520],
+      [-1.34, 0.430, 0.310, 0.735, 0.520],
+      [-1.06, 0.415, 0.305, 0.720, 0.530],
+      [-0.86, 0.360, 0.300, 0.660, 0.545],
+    ];
+    for (const st of steps) {
+      const loop: number[][] = [
+        [st[1]!, st[3]!],   // outboard top
+        [st[2]!, st[3]!],   // inboard top
+        [st[2]!, st[4]!],   // inboard bottom
+        [st[1]!, st[4]!],   // outboard bottom
+      ];
+      if (sgn < 0) loop.reverse();
+      const ring: number[] = [];
+      for (const p of loop) ring.push(sgn * p[0]!, p[1]!, st[0]!);
+      rings.push(ring);
+    }
+    m.loft(rings, c, true);
+    m.fan(rings[0]!, c, sgn > 0);
+    m.fan(rings[rings.length - 1]!, c, sgn < 0);
+  }
+}
 
 function buildDarkGroup(): THREE.BufferGeometry {
   const m = new Mesher();
   const dark = PALETTE.hullDark;
 
-  for (const cowl of [FORE_COWL, AFT_COWL]) {
-    const rings = cowl.map((st) => shellRing(st));
-    m.loft(rings, dark, false);
+  for (const [cowl, exp, creases] of [
+    [FORE_COWL, 0.55, FORE_CREASE],
+    [AFT_COWL, 0.40, AFT_CREASE],
+  ] as const) {
+    const rings = cowl.map((st) => shellRing(st, exp, creases));
+    m.loft(rings, dark, false, shellSkip(creases));
     // The arch is open along its bottom edge, so the end caps are closed against
     // the deck by the chord between the two base points; a centroid fan over the
     // arch alone is convex and does exactly that.
     m.fan(rings[0]!, dark, true);
     m.fan(rings[rings.length - 1]!, dark, false);
+  }
+
+  buildCoaming(m, dark);
+  buildIntakes(m, dark);
+
+  // Jet nozzle and its steering bucket, on the transom face.
+  //
+  // The chase camera looks at that face for the whole race and it was one flat
+  // plate of racer colour with nothing on it - the single biggest reason the boat
+  // read as a crate from behind. A nozzle gives the transom a centre, and the
+  // bucket above it gives it a horizontal line to break the height.
+  m.tube(
+    [[0, -0.09, -1.84], [0, -0.09, -1.98], [0, -0.09, -2.07], [0, -0.09, -2.12]],
+    [0.145, 0.132, 0.118, 0.140],
+    8, dark, false, true,
+  );
+  // Two vent panels flanking it. Double-sided, because the transom is raked and
+  // the low chase camera can catch the back of them.
+  for (const sgn of [-1, 1]) {
+    m.panel(sgn * 0.33, -0.04, -1.965, -1, 0, 0, 0, 1, 0, 0.095, 0.105, dark);
+    m.panel(sgn * 0.33, -0.04, -1.960, 1, 0, 0, 0, 1, 0, 0.095, 0.105, dark);
   }
 
   // Wraparound screen. Rows run bottom -> top (dv points up and aft) and columns
@@ -553,17 +815,40 @@ function buildMetalGroup(): THREE.BufferGeometry {
   const c = NEUTRAL;
   // Twin stacks rising off the engine cowl and kicking aft. The outlet flares,
   // which is the whole silhouette of an exhaust at this scale.
+  // Twin exhausts rising off the engine cowl and kicking aft, each a squared
+  // trunk that steps out into a flared rectangular outlet.
+  //
+  // They used to be round tubes, and at gameplay size a minified round tube with
+  // a matcap on it is a grey capsule - a critic could not name the part. A box
+  // has four planes that take four different bands and eight edges the Sobel pass
+  // can ink, so the same forty triangles read as machinery instead of as debris.
+  //
+  // Rings are listed outlet-first so they advance +Z; the profile is ordered
+  // counter-clockwise about +Z, which puts cross(du, dv) outward.
   for (const sgn of [-1, 1]) {
-    m.tube(
-      [
-        [sgn * 0.17, 0.60, -1.30],
-        [sgn * 0.18, 0.72, -1.50],
-        [sgn * 0.20, 0.84, -1.74],
-        [sgn * 0.21, 0.88, -1.84],
-      ],
-      [0.052, 0.055, 0.058, 0.072],
-      8, c,
-    );
+    // [z, y, halfWidth, halfHeight]
+    const steps: readonly (readonly number[])[] = [
+      [-1.94, 0.93, 0.098, 0.086],  // outlet lip, flared
+      [-1.86, 0.90, 0.072, 0.062],  // throat
+      [-1.72, 0.84, 0.076, 0.066],
+      [-1.50, 0.73, 0.072, 0.062],
+      [-1.30, 0.62, 0.066, 0.058],  // root, buried in the cowl
+    ];
+    const rings: number[][] = [];
+    for (const st of steps) {
+      const x = sgn * (0.185 + (st[1]! - 0.62) * 0.06);
+      const hw = st[2]!;
+      const hh = st[3]!;
+      rings.push([
+        x - hw, st[1]! - hh, st[0]!,
+        x + hw, st[1]! - hh, st[0]!,
+        x + hw, st[1]! + hh, st[0]!,
+        x - hw, st[1]! + hh, st[0]!,
+      ]);
+    }
+    m.loft(rings, c, true);
+    m.fan(rings[0]!, c, true);
+    m.fan(rings[rings.length - 1]!, c, false);
   }
   return m.toGeometry('boatMetal', false);
 }
@@ -654,52 +939,78 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   const trim = PALETTE.hullTrim;
   const slot = index & 3;
 
-  // --- livery stripes ------------------------------------------------------
-  // Laid on the deck rather than modelled into it: two rows of quads offset 1 cm
-  // along +Y, which is ~600x the depth-buffer resolution at racing distance and
-  // therefore cannot z-fight, while costing 32 triangles.
+  // --- livery rails --------------------------------------------------------
+  // Raised strakes, not painted stripes. A decal offset a centimetre along +Y is
+  // invisible to a screen-space edge pass, because nothing about the surface
+  // normal changes across it; a 22 mm rail with two vertical cheeks puts a hard
+  // crease down the length of the largest flat area on the boat and costs the
+  // same order of triangles.
+  //
+  // Ordered so cross(du, dv) points out of every face. Rings advance +Z, so the
+  // starboard rail lists its outboard edge first and the port rail is reversed.
+  // The band from u = 0.72 to 0.92 is the only strip of deck that is clear of the
+  // footwell inboard and of both cowls all the way fore and aft, so it is the
+  // only place a rail runs unbroken from transom to stem - which is exactly where
+  // a gunwale rail belongs anyway.
+  const RAIL_H = 0.024;
   for (const sgn of [-1, 1]) {
-    const uA = sgn * 0.42;
-    const uB = sgn * 0.60;
+    const uIn = sgn * 0.72;
+    const uOut = sgn * 0.92;
     const rows: number[][] = [];
-    for (let s = 1; s < ST_Z.length - 1; s++) {
-      const z = ST_Z[s]!;
+    for (let s = 0; s < ST_Z.length - 1; s++) {
       const hb = ST_HB[s]! * ST_FLARE[s]!;
-      // Ordered so cross(du, dv) is +Y on both sides: du must be -X, and the
-      // stripe rings advance +Z, so the port stripe lists its outer edge first.
-      const first = sgn > 0 ? uB : uA;
-      const second = sgn > 0 ? uA : uB;
-      rows.push([
-        first * hb, deckY(s, first) + 0.010, z,
-        second * hb, deckY(s, second) + 0.010, z,
-      ]);
+      const yIn = deckY(s, uIn);
+      const yOut = deckY(s, uOut);
+      const quad: number[][] = [
+        [uOut * hb, yOut - 0.02, rakeZ(s, yOut)],
+        [uOut * hb, yOut + RAIL_H, rakeZ(s, yOut)],
+        [uIn * hb, yIn + RAIL_H, rakeZ(s, yIn)],
+        [uIn * hb, yIn - 0.02, rakeZ(s, yIn)],
+      ];
+      if (sgn < 0) quad.reverse();
+      rows.push(quad.flat());
     }
     m.loft(rows, trim, false);
   }
 
-  // --- dorsal fin ----------------------------------------------------------
+  // --- dorsal fin(s) -------------------------------------------------------
   // Rings advance +Y; the profile is ordered counter-clockwise about +Y
   // (lead -> starboard -> trail -> port) so the faces point outward.
-  const h = FIN_HEIGHT[slot]!;
-  const sweep = FIN_SWEEP[slot]!;
-  const finRings: number[][] = [];
+  //
+  // Count, height, chord and sweep all vary by slot. Four boats in one class have
+  // to be told apart at a hundred metres, where the racer colour is three pixels
+  // wide, so the differences have to be in the outline: one boat carries a single
+  // tall blade, one a pair of short ones, and so on.
+  const fin = FIN[slot]!;
   const finSteps = 4;
-  for (let i = 0; i <= finSteps; i++) {
-    const v = i / finSteps;
-    const y = 0.66 + h * v;
-    const zc = -1.42 - sweep * v;
-    const hc = 0.34 * (1 - 0.58 * v);
-    const ht = 0.030 * (1 - 0.72 * v);
-    finRings.push([
-      0, y, zc + hc,
-      ht, y, zc,
-      0, y, zc - hc,
-      -ht, y, zc,
-    ]);
+  for (let f = 0; f < fin.count; f++) {
+    const xOff = fin.count === 1 ? 0 : (f * 2 - (fin.count - 1)) * fin.spread;
+    const finRings: number[][] = [];
+    for (let i = 0; i <= finSteps; i++) {
+      const v = i / finSteps;
+      const y = 0.72 + fin.height * v;
+      const zc = fin.z - fin.sweep * v;
+      const hc = fin.chord * 0.5 * (1 - 0.58 * v);
+      const ht = 0.032 * (1 - 0.72 * v);
+      finRings.push([
+        xOff, y, zc + hc,
+        xOff + ht, y, zc,
+        xOff, y, zc - hc,
+        xOff - ht, y, zc,
+      ]);
+    }
+    m.loft(finRings, trim, true);
+    m.fan(finRings[0]!, trim, true);
+    m.fan(finRings[finSteps]!, trim, false);
   }
-  m.loft(finRings, trim, true);
-  m.fan(finRings[0]!, trim, true);
-  m.fan(finRings[finSteps]!, trim, false);
+  // A tailplane across the fin tops, on the slots that have one.
+  if (fin.tailSpan > 0) {
+    const ty = 0.72 + fin.height * 0.94;
+    const tz = fin.z - fin.sweep * 0.94;
+    // Top face wants cross(u, v) = +Y, so v points -Z; the underside is the pair.
+    m.panel(0, ty, tz, 1, 0, 0, 0, 0, -1, fin.tailSpan, 0.10, trim);
+    m.panel(0, ty - 0.026, tz, 1, 0, 0, 0, 0, 1, fin.tailSpan, 0.10, trim);
+  }
 
   // --- bow spoiler ---------------------------------------------------------
   // Rings advance +X along the span; the profile is a four-point aerofoil loop
@@ -715,10 +1026,10 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   for (let i = 0; i <= spanSteps; i++) {
     const u = (i / spanSteps) * 2 - 1;
     const x = u * halfSpan;
-    const y = 0.93 + tipRise * u * u - anhedral * Math.abs(u);
-    const zc = 1.66 - tipSweep * u * u;
+    const y = 1.03 + tipRise * u * u - anhedral * Math.abs(u);
+    const zc = 1.60 - tipSweep * u * u;
     const hc = (chord * 0.5) * (1 - 0.24 * u * u);
-    const ht = 0.020;
+    const ht = 0.038;
     wingRings.push([
       x, y + ht, zc,
       x, y, zc + hc,
@@ -729,19 +1040,77 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   m.loft(wingRings, trim, true);
   m.fan(wingRings[0]!, trim, true);
   m.fan(wingRings[spanSteps]!, trim, false);
+  // Endplates. A bare wing at this size is a line in the silhouette and reads as
+  // a stray edge; a plate at each tip closes the shape into something a player
+  // can name, and it is the cheapest per-slot silhouette variation on the boat.
+  for (const s of [-1, 1]) {
+    const x = s * halfSpan;
+    const y = 1.03 + tipRise - anhedral;
+    const zc = 1.60 - tipSweep;
+    const hc = chord * 0.46;
+    m.panel(x + s * 0.012, y + 0.018, zc, 0, 0, -s, 0, 1, 0, hc, 0.058, trim);
+    m.panel(x, y + 0.018, zc, 0, 0, s, 0, 1, 0, hc, 0.058, trim);
+  }
   // Two struts down onto the cowling, so the wing is carried rather than floating.
   for (const sgn of [-1, 1]) {
-    m.tube([[sgn * 0.20, 0.78, 1.60], [sgn * 0.20, 0.93, 1.66]], [0.030, 0.026], 5, trim);
+    m.tube([[sgn * 0.21, 0.82, 1.52], [sgn * 0.21, 1.03, 1.60]], [0.032, 0.026], 5, trim);
   }
 
   // --- number plates -------------------------------------------------------
   // Aft face of the engine cowl: the one the chase camera stares at all race.
-  addPlate(m, slot, 0, 0.44, -1.995, -1, 0, 0, 0, 1, 0, 0.15, 0.13);
-  // Both flanks, for the pack and overtake angles.
-  addPlate(m, slot, 0.462, 0.53, -1.32, 0, 0, -1, 0, 1, 0, 0.15, 0.13);
-  addPlate(m, slot, -0.462, 0.53, -1.32, 0, 0, 1, 0, 1, 0, 0.15, 0.13);
+  addPlate(m, slot, 0, 0.50, -2.075, -1, 0, 0, 0, 1, 0, 0.125, 0.11);
+  // One per flank, laid on the tumblehome topside - the biggest flat surface on
+  // the boat and the one that faces the camera in a pack shot. The plate lies in
+  // the topside's own plane, so it reads as painted on rather than bolted to the
+  // side of a cowl it does not fit.
+  addTopsidePlate(m, slot, -1.30, 1);
+  addTopsidePlate(m, slot, -1.30, -1);
 
   return m.toGeometry('boatTrim', true);
+}
+
+/**
+ * A number plate laid flat on the topside panel at station z, on the given side.
+ *
+ * The panel runs from the knuckle up to the sheer; the plate is centred on it and
+ * lies in it, so `v` is the up-slope direction and `u` runs along the hull. `u` is
+ * -Z to starboard and +Z to port, which is what puts the digit the right way
+ * round from outside on both sides.
+ */
+function addTopsidePlate(m: Mesher, digit: number, z: number, side: number): void {
+  const hb = stationAt(ST_HB, z);
+  const chine = stationAt(ST_CHINE, z);
+  const deck = stationAt(ST_DECK, z);
+  const knuckY = chine + (deck - chine) * KNUCK_RISE;
+  const knuckX = hb * stationAt(ST_KNUCK, z);
+  const sheerX = hb * stationAt(ST_FLARE, z);
+  const dx = sheerX - knuckX;
+  const dy = deck - knuckY;
+  const len = Math.hypot(dx, dy) || 1;
+  // Up-slope, leaning inboard with the tumblehome (dx is negative).
+  const vx = (side * dx) / len;
+  const vy = dy / len;
+  const uz = -side;
+  // n = u x v with u = (0, 0, -side) and v as above, already unit length.
+  const nx = (side * dy) / len;
+  const ny = -dx / len;
+  const lift = 0.010;
+  // Centred a little high on the panel and sized to the panel's own height, so
+  // the ink border always clears the sheer and the knuckle.
+  const cx = side * (knuckX + dx * 0.56);
+  const cy = knuckY + dy * 0.56;
+  const hw = 0.160;
+  const hh = 0.105;
+  // Ink border: a slightly larger dark panel just under the cream one.
+  m.panel(
+    cx + nx * lift * 0.5, cy + ny * lift * 0.5, z,
+    0, 0, uz, vx, vy, 0, hw + 0.022, hh + 0.022, PALETTE.hullDark,
+  );
+  addPlate(
+    m, digit,
+    cx + nx * lift, cy + ny * lift, z,
+    0, 0, uz, vx, vy, 0, hw, hh,
+  );
 }
 
 // ------------------------------------------------------------------ flame ----
@@ -795,9 +1164,11 @@ function buildFlameGeometry(): THREE.BufferGeometry {
     m.fan(rings[rings.length - 1]!, cool, true);
   };
 
-  jet(0, -0.14, -2.06, 0.20, 1.35);
-  jet(-0.21, 0.88, -1.86, 0.075, 0.52);
-  jet(0.21, 0.88, -1.86, 0.075, 0.52);
+  // The transom is raked, so the main nozzle sits where the bottom actually ends
+  // (z = -1.89 at the waterline), not at the sheer's station.
+  jet(0, -0.12, -1.90, 0.21, 1.40);
+  jet(-0.204, 0.93, -1.96, 0.078, 0.54);
+  jet(0.204, 0.93, -1.96, 0.078, 0.54);
 
   return m.toGeometry('boatFlame', true);
 }

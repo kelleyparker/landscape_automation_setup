@@ -36,6 +36,21 @@ export interface RiderOptions {
  *  line reads as a toy. 2.1px at any distance. */
 const RIDER_INK_PX = 2.1;
 
+/**
+ * Where the rider actually stands, relative to `boat.riderMount`.
+ *
+ * The mount is placed at the *hip* station on the footwell floor, but the yoke
+ * grips are 0.72m forward of it. A standing figure whose feet are on the mount
+ * cannot reach them from any pose - measured, the wrists came up 0.46m short and
+ * the hands hung in open air beside the bars. Moving the stance forward inside
+ * the footwell (which runs to z = +0.90 in boat space) closes most of that gap;
+ * the racing fold and the arm length close the rest.
+ *
+ * This is a stance offset, not a fudge: a stand-up racer stands directly behind
+ * the column with the bars over their knees, not a metre back on the transom.
+ */
+const STANCE_FORWARD = 0.38;
+
 export class Rider {
   readonly index: number;
   readonly root: THREE.Object3D;
@@ -71,6 +86,7 @@ export class Rider {
     });
     this.root = this.rig.root;
     this.root.name = `rider${opts.index}`;
+    this.root.position.z = STANCE_FORWARD;
     this.triangles = this.rig.triangles;
 
     // Outline after the meshes are parented: the inverted hull is added as a

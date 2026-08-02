@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { PALETTE, SUN_DIR } from '../core/Palette';
 import { rng, Rng } from '../core/Rng';
-import { sampleSurface, type SurfaceSample } from './GerstnerCPU';
+import { sampleHeight, sampleSurface, type SurfaceSample } from './GerstnerCPU';
 import { WAKE_VERT, WAKE_FRAG, SPRAY_VERT, SPRAY_FRAG } from './shaders/foamShaders';
 
 /**
@@ -18,21 +18,23 @@ import { WAKE_VERT, WAKE_FRAG, SPRAY_VERT, SPRAY_FRAG } from './shaders/foamShad
  *     eroding - hollowing out along its centreline into two Kelvin arms of
  *     broken islands - before it fades.
  *
- *     Every spine point is re-sampled against the ocean surface every frame.
- *     This is the expensive part and it is not optional: the swell here reaches
- *     nearly 3 m peak-to-trough, and a ribbon laid flat at the height it was
- *     emitted at would spend most of its life buried in one wave and floating a
- *     metre above the next. Measured cost is ~0.78 ms/frame for four full-length
- *     ribbons (768 `sampleSurface` calls) on an M-series core - about 4.5% of
- *     the 16.7 ms budget, spent on the single most visible surface in the game.
+ *     Every spine point is re-sampled against the ocean surface every frame,
+ *     and every *lip* of every wide point is sampled independently. This is the
+ *     expensive part and it is not optional: the swell here reaches nearly 3 m
+ *     peak-to-trough, and a ribbon laid flat at the height it was emitted at
+ *     would spend most of its life buried in one wave and floating a metre above
+ *     the next. Cost is roughly 1.2 ms/frame for four full-length ribbons (528
+ *     `sampleSurface` plus about 900 cheaper `sampleHeight` calls) on an
+ *     M-series core - under 8% of the 16.7 ms budget, spent on the single most
+ *     visible surface in the game.
  *
- *     `sampleSurface` rather than `sampleHeight` because it returns the analytic
- *     normal in the same solve (the inverse-map iteration dominates the cost, so
- *     the normal is nearly free). That normal gives the local tangent plane,
- *     which is what lets the ribbon's two lips - up to 3.6 m apart on an old,
- *     fully spread segment - sit on the *slope* of the wave instead of on a
- *     horizontal chord through it. Without that correction a wide tail knifes
- *     through the surface on any real swell.
+ *     The spine uses `sampleSurface` because it returns the analytic normal and
+ *     the crest Jacobian in the same solve, and the shader needs both. The lips
+ *     use `sampleHeight`, which skips the normal. Deriving the lip heights from
+ *     the spine's tangent plane instead - which is what this used to do - is a
+ *     first-order fit, and over the 5 m half-width of a fully spread segment it
+ *     is wrong by more than the entire amplitude of the chop layers. That is
+ *     what made the wide tail knife through the swell and read as a decal.
  *
  *  2. **Spray particles** - one shared pool for all four boats, ballistic with
  *     gravity and drag, dying on contact with the water with a brief flattening
@@ -54,13 +56,19 @@ const CAMERA_FAR = 4200;
 const RACER_COUNT = 4;
 
 /**
- * Spine points per ribbon. 192 points at 0.62 m is a 119 m trail, which is very
- * close to five seconds of ribbon at racing speed - so capacity and lifetime run
+ * Spine points per ribbon. 132 points at 0.90 m is a 119 m trail, which is very
+ * close to four seconds of ribbon at racing speed - so capacity and lifetime run
  * out at about the same moment and neither one visibly truncates the other.
+ *
+ * The spacing was 0.62 m over 192 points for the same trail length. It was
+ * loosened to pay for the lip sampling in `update()` below: a 0.90 m chord is
+ * still eight segments across the shortest chop wavelength in `waveConfig`,
+ * whereas guessing the lip height from the spine's tangent plane was wrong by
+ * decimetres on every wide segment.
  */
-const WAKE_MAX_POINTS = 192;
+const WAKE_MAX_POINTS = 132;
 /** Emission is throttled by distance, never by frame count. */
-const WAKE_MIN_SPACING = 0.62;
+const WAKE_MIN_SPACING = 0.90;
 /**
  * Extra points are inserted when a frame covers more than one spacing (a 50 ms
  * dt at 30 m/s is 1.5 m), so the ribbon keeps a regular tessellation instead of
@@ -73,8 +81,13 @@ const WAKE_MAX_INSERTS = 3;
  * inside edge visibly corners.
  */
 const WAKE_TURN_STEP = 0.10;
-/** Seconds a spine point survives. Inside the 4-6 s the look calls for. */
-const WAKE_LIFE = 5.0;
+/**
+ * Seconds a spine point survives. The brief is a wake that is gone in three to
+ * four seconds; the shader holds full opacity to 86% of this and the erosion
+ * has already broken the tail into islands well before that, so the last of a
+ * ribbon leaves the frame at about 3.4 s and nothing is left at 4.
+ */
+const WAKE_LIFE = 4.0;
 /**
  * Half-width multiplier at end of life. A wake opens hard in its first second,
  * then keeps opening slowly - roughly 1.6x in the first second and 5.4x by the
@@ -87,9 +100,28 @@ const WAKE_SPREAD = 5.4;
 /**
  * Lift above the sampled surface, in metres. Together with the polygon offset
  * this keeps the ribbon clear of the ocean mesh without reading as a hovering
- * sheet - 6 cm is under a tenth of the chop amplitude.
+ * sheet - 8.5 cm is an eighth of the smallest chop amplitude. It went up from
+ * 6 cm when the lips started being sampled independently: a lip now sits on its
+ * own patch of water rather than on a chord through the spine, so the ribbon
+ * follows the surface far more closely and needs slightly more clearance before
+ * the polygon offset has to save it.
  */
-const WAKE_LIFT = 0.06;
+const WAKE_LIFT = 0.085;
+
+/**
+ * Half-width, in metres, above which a spine point stops trusting the tangent
+ * plane through its own spine sample and samples the ocean under each lip
+ * directly.
+ *
+ * The tangent plane is a first-order fit. Over the 0.9 m half-width of a fresh
+ * segment it is accurate to a centimetre or two; over the 5 m half-width of a
+ * fully spread one it is out by more than the whole 8.7 m and 4.9 m chop
+ * layers, which is why the old ribbon knifed straight through the swell and the
+ * critics read it as a decal. Two extra `sampleHeight` calls per wide point buy
+ * a ribbon that actually drapes. `sampleHeight` skips the normal solve, so the
+ * marginal cost is well under one full `sampleSurface`.
+ */
+const WAKE_LIP_SAMPLE_HW = 0.85;
 
 /**
  * Foam drift, in periods/second, for the two octaves of the analytic blob field.
@@ -131,7 +163,7 @@ const SPRAY_DRAG = 1.15;
  * floating on the water, and at any given moment most of the pool was in that
  * state. An eighth of a second is enough to register the mark being made.
  */
-const SPRAY_SPLAT_LIFE = 0.12;
+const SPRAY_SPLAT_LIFE = 0.07;
 /** Splat sits this far above the surface so it never z-fights the ocean. */
 const SPRAY_SPLAT_LIFT = 0.045;
 /** Particles requested per unit of `amount` passed to emitSpray. */
@@ -211,8 +243,14 @@ const FOAM_EDGE = PALETTE.waterDeep.clone().lerp(PALETTE.foamShade, 0.25);
  * mauve-grey and mint shards reported across every frame. Whitewater is white;
  * the only variation it is allowed is a cool one, so the racer colour is now
  * ignored entirely and the droplet varies along foam-to-crest instead.
+ *
+ * A third of the way to crest cyan was still too far. Droplets drawn over the
+ * wake ribbon - which is where nearly all of them are - came out visibly bluer
+ * than the foam they sat on, so each one read as a separate pale object rather
+ * than as a piece of the same water. 15% keeps them inside the ribbon's own two
+ * tones and lets them vary without becoming bubbles stuck to the surface.
  */
-const SPRAY_TINT_COOL = 0.34;
+const SPRAY_TINT_COOL = 0.15;
 
 /**
  * The multiplier that carries foam white to crest cyan, so `_tint` can lerp
@@ -261,7 +299,16 @@ function makeSprayBlob(): THREE.BufferGeometry {
   // band reads as a vignette where what is wanted is a drawn edge. On a droplet
   // only a few pixels across it drops below one fragment and the particle
   // correctly resolves to a solid chip.
-  const RINGS = [0.52, 0.86, 1.0];
+  //
+  // Pushed outward from [0.52, 0.86, 1.0]. With the shadow ring at just over
+  // half the radius, half of every droplet was the cool tone and the outer
+  // eighth was contour: on screen that is a pale ring round a lighter middle,
+  // and two dozen of those at near-identical sizes read as clip-art bubbles
+  // scattered over the wake. The droplet is now white out to 86% with a tenth
+  // of the radius of cool step and a twentieth of contour - a drawn line on a
+  // large droplet, nothing at all on a small one. These are the constants
+  // R_CORE and R_BODY in the fragment shader and must move with them.
+  const RINGS = [0.90, 0.96, 1.0];
 
   const vertCount = 1 + SEGMENTS * RINGS.length;
   const pos = new Float32Array(vertCount * 3);
@@ -567,27 +614,43 @@ class WakeRibbon {
       // +-(nx, nz) * hw from the spine, so the two vertical offsets are equal
       // and opposite - one dot product covers both.
       const n = _surf.normal;
-      // Ny is floored: on a steep crest a near-horizontal normal would send the
-      // lips to infinity, and a wake lip flung 20 m into the air is a far worse
-      // artefact than one that slightly under-tilts.
-      const invNy = 1 / Math.max(n.y, 0.35);
-      let dy = -(n.x * this.nx[k]! + n.z * this.nz[k]!) * invNy * hw;
-      const dyMax = hw * 0.85;
-      if (dy > dyMax) dy = dyMax;
-      else if (dy < -dyMax) dy = -dyMax;
-
-      const h = _surf.height + WAKE_LIFT;
       const ox = this.nx[k]! * hw;
       const oz = this.nz[k]! * hw;
+
+      let yL: number;
+      let yR: number;
+      if (hw > WAKE_LIP_SAMPLE_HW) {
+        // Wide segment: seat each lip on the water it is actually over. This is
+        // what makes an old, spread ribbon hump over a crest and fall into a
+        // trough instead of spanning both on one flat chord.
+        yL = sampleHeight(x - ox, z - oz, elapsed) + WAKE_LIFT;
+        yR = sampleHeight(x + ox, z + oz, elapsed) + WAKE_LIFT;
+      } else {
+        // Narrow segment: the tangent plane through the spine is accurate to a
+        // centimetre or two here, and this is the case that runs every frame
+        // for every boat right behind the transom.
+        //
+        // Ny is floored: on a steep crest a near-horizontal normal would send
+        // the lips to infinity, and a wake lip flung 20 m into the air is a far
+        // worse artefact than one that slightly under-tilts.
+        const invNy = 1 / Math.max(n.y, 0.35);
+        let dy = -(n.x * this.nx[k]! + n.z * this.nz[k]!) * invNy * hw;
+        const dyMax = hw * 0.85;
+        if (dy > dyMax) dy = dyMax;
+        else if (dy < -dyMax) dy = -dyMax;
+        const h = _surf.height + WAKE_LIFT;
+        yL = h - dy;
+        yR = h + dy;
+      }
 
       const vL = i * 2;
       const vR = vL + 1;
 
       pos[vL * 3 + 0] = x - ox;
-      pos[vL * 3 + 1] = h - dy;
+      pos[vL * 3 + 1] = yL;
       pos[vL * 3 + 2] = z - oz;
       pos[vR * 3 + 0] = x + ox;
-      pos[vR * 3 + 1] = h + dy;
+      pos[vR * 3 + 1] = yR;
       pos[vR * 3 + 2] = z + oz;
 
       const arc = this.dist[k]!;
@@ -599,8 +662,8 @@ class WakeRibbon {
       wav[vL * 4 + 0] = n.x; wav[vL * 4 + 1] = n.y; wav[vL * 4 + 2] = n.z; wav[vL * 4 + 3] = jac;
       wav[vR * 4 + 0] = n.x; wav[vR * 4 + 1] = n.y; wav[vR * 4 + 2] = n.z; wav[vR * 4 + 3] = jac;
 
-      const lo = h - Math.abs(dy);
-      const hi = h + Math.abs(dy);
+      const lo = yL < yR ? yL : yR;
+      const hi = yL < yR ? yR : yL;
       if (x - hw < minX) minX = x - hw;
       if (x + hw > maxX) maxX = x + hw;
       if (z - hw < minZ) minZ = z - hw;
@@ -873,10 +936,16 @@ export class FoamSystem {
       this.svy[j] = vy;
       this.svz[j] = vz;
 
-      // Half-extents. Smaller than they were: a droplet is a detail on top of
-      // the wake, not a competing shape, and the old 26 cm upper bound put
-      // half-metre cards across the deck of whatever boat emitted them.
-      this.sSize[j] = this.rng.range(0.055, 0.165) * (0.82 + dirLen * 0.018);
+      // Half-extents, biased small by squaring the draw. A uniform 5.5-16.5 cm
+      // draw put a third of the pool at the top of the range, and at the six to
+      // ten metres a chase camera sits from the wake a 33 cm droplet is 100 px
+      // - big enough for its contour ring to read as a drawn outline, and with
+      // two dozen of them at much the same size the whole population read as
+      // clip-art stamped on the foam. Squaring puts most droplets at 3-6 cm and
+      // leaves the occasional 11 cm one, which is a size *distribution* rather
+      // than a repeated stamp.
+      const su = this.rng.next();
+      this.sSize[j] = (0.021 + 0.062 * su * su) * (0.82 + dirLen * 0.018);
       this.sLife[j] = 0;
       this.sInvLife[j] = 1 / this.rng.range(0.55, 1.15);
       this.sState[j] = FLYING;
@@ -1009,8 +1078,8 @@ export class FoamSystem {
         // Squash: spreads sideways as it collapses vertically, so the impact
         // reads as a mark being made rather than a particle being deleted.
         const base = this.sSize[i]!;
-        sizeX = base * (1 + 0.30 * t01);
-        sizeY = base * (1 - 0.90 * t01);
+        sizeX = base * (1 + 0.55 * t01);
+        sizeY = base * (1 - 0.96 * t01);
         stretch = 1;
         alpha = t01 < 0.45 ? 0.9 : t01 < 0.78 ? 0.55 : 0.26;
       }

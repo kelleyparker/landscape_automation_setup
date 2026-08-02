@@ -266,37 +266,66 @@ const CAMERA_FAR = 4200;
  */
 const RIBBON_STEP = 1.1;
 /**
- * Half-width of the racing line ribbon, metres. 1.75 m put a 3.5 m band down
- * the centre of the frame - wider than the boats - which is far more line than
- * a guidance hint needs.
+ * Half-width of the racing line ribbon, metres.
+ *
+ * 1.1 m was tried and is too little. A 2.2 m ribbon is narrower than one boat,
+ * so from the chase camera it is hidden under the hull and the wake for the
+ * whole of every straight, and from altitude it falls to a two-pixel scratch
+ * that the eye reads as a scuff on the water rather than as a drawn line. The
+ * ribbon has to survive both, and 3.5 m - four fifths of a boat length - is the
+ * width at which its three bands are still separately visible at 400 m while
+ * the strip is still obviously narrower than the thing driving along it.
  */
-const RIBBON_HALF = 1.1;
+const RIBBON_HALF = 1.75;
 /** Target chevron period; the real one divides the lap exactly so it seams. */
 const CHEVRON_TARGET = 9.0;
 /** Chevron travel, metres/second, in the direction of travel. */
 const CHEVRON_SPEED = 16.0;
 /** Constant lift off the water, and the per-metre depth-buffer allowance. */
-const RIBBON_LIFT = 0.035;
-const RIBBON_LIFT_SLOPE = 0.0004;
+const RIBBON_LIFT = 0.05;
+const RIBBON_LIFT_SLOPE = 0.00055;
 /**
  * Peak opacity of the racing line.
  *
- * The line is drawn before the wake foam and never writes depth, so foam always
- * composites over it - but "over" is not "instead of", and at full opacity a
- * saturated fill under a hard-edged alpha foam texture shows through every gap
- * in the churn as a field of interlocking blocks. Under half, the ribbon reads
- * as light *in* the water: foam covers it, spray dilutes it, and there is no
- * depth at which it can look like a decal fighting the surface for the pixels.
+ * 0.46 was tried and it is what turned the line into a wisp: a half-strength
+ * fill over water that is itself high-chroma leaves a value difference of a few
+ * counts, so the ribbon survived only where it happened to cross a dark trough
+ * and vanished everywhere else - which reads exactly as a broken, patchy line
+ * rather than as a continuous one. Continuity is the whole job here, and
+ * continuity is a *minimum* contrast along the length, not an average one.
+ *
+ * The line can afford this because it is drawn before the wake foam and never
+ * writes depth, so the churn still composites straight over it, and because the
+ * alpha is not flat across the width: the sheath runs at roughly half this and
+ * the outer ramp takes it to nothing well inside the geometry, so there is no
+ * hard strip boundary anywhere for the foam to interlock with.
  */
-const RIBBON_OPACITY = 0.46;
+const RIBBON_OPACITY = 0.76;
 /**
- * Where the ribbon starts fading out, and where it is gone. It used to run to
- * 1500 m, which put stray green pixels on the horizon a kilometre and a half
- * away, above the waterline, on the far side of the lap. The line's job is the
- * next two corners; the gates are the long-range cue.
+ * Where the ribbon starts fading out, and where it is gone.
+ *
+ * 300/640 was tried and it is too short for any camera that gets above the
+ * deck: from altitude the far side of the lap is 1.2 km away and the line
+ * simply stopped, so the circuit read as a stub near the boat and bare sea
+ * everywhere else. The ribbon is the only thing in the world that describes the
+ * *shape* of the course, so it has to survive to the point where the course's
+ * own haze has taken it anyway - see LINE_HAZE_FAR, which is what actually
+ * retires it. This fade only makes sure it is gone before the horizon seam.
  */
-const RIBBON_FADE_START = 300;
-const RIBBON_FADE_END = 640;
+const RIBBON_FADE_START = 700;
+const RIBBON_FADE_END = 1700;
+/**
+ * The *near* fade, in metres of view depth. See the long note in the fragment
+ * shader: inside this the ribbon is a foreshortened wedge lying on the player's
+ * own wake, which is where every "green blotches punching through the foam"
+ * report in the review came from. The chase camera sits about 10 m back, so the
+ * line arrives just ahead of the boat and runs away from there.
+ *
+ * The start/finish strip overrides both to zero - it is a mark you cross, and
+ * it has to be there when you are on it.
+ */
+const RIBBON_NEAR_GONE = 6;
+const RIBBON_NEAR_FULL = 19;
 /** Length of the start/finish strip along the course, metres. */
 const START_STRIP_LENGTH = 6.5;
 /** How much wider than the course the start strip and the start gate are. */
@@ -308,23 +337,52 @@ const GATE_COUNT = 12;
  * Height above the waterline of the banner's *attachment points*, and of the
  * lamp above them.
  *
- * At 4.05 m the crossbar hung at exactly the height a racer occupies on screen:
- * it entered frame left at 30% and left it at 42%, sliced through the pack in
- * every capture, and sat parallel to the true horizon a hundred pixels below
- * it - two competing horizontals with the road sign winning. A gate is a frame
- * device. It has to pass overhead, so the eye reads under it to the boats.
+ * The history here is a pendulum and this is the settled end of it. At 4.05 m
+ * the crossbar hung at exactly the height a racer occupies on screen and sliced
+ * through the pack; the answer taken was 9 m, which fixed that by making the
+ * gate motorway infrastructure - a fluted column and an arch that left the top
+ * of the frame from thirty metres away.
+ *
+ * The real measure is the boat: 4.2 m long, with a standing rider whose head is
+ * about 2.4 m off the water, on a sea whose swell is about a metre. Marine
+ * furniture at that scale is a mark you pass, not a structure you drive under.
+ * A 5 m attachment puts the banner's underside at 4.4 m - two metres of daylight
+ * over the rider, which is enough that the span passes overhead and the eye
+ * still reads under it, without the gate ever becoming the largest object in
+ * the picture.
  */
-const BANNER_Y = 9.0;
+const BANNER_Y = 5.0;
 /**
  * How far the middle of the span rises above its two attachment points, in
  * metres. Positive: this is an arch, not a sag. A straight bar at any height is
  * still a horizontal rule across the picture; a bowed one is a shape you look
  * through, and the curve is what stops it reading as a second horizon.
+ *
+ * Held at about 6% of the span, which is the same bow the 3 m rise gave the old
+ * 50 m gates - the arch is a proportion of the shape, not an absolute.
  */
-const BANNER_RISE = 3.0;
-const BANNER_HEIGHT = 2.45;
-const BANNER_THICKNESS = 0.26;
-const LAMP_Y = 9.62;
+const BANNER_RISE = 1.35;
+const BANNER_HEIGHT = 1.15;
+const BANNER_THICKNESS = 0.13;
+const LAMP_Y = 5.8;
+/**
+ * The drawn gate is *narrower than the course*, and deliberately.
+ *
+ * `widthAt` runs from 10 m at the chicane to 28 m on the start straight, and a
+ * gate built on that is 56 m of banner across the widest part of the circuit -
+ * fourteen boat lengths, which is why it read as motorway gantry. A race marker
+ * is something you aim at, so its span has to be a size the eye can judge
+ * against the boat: 18 m at the tightest, 24 m at the widest, which is four to
+ * six boat lengths and the width of a real slalom gate on water.
+ *
+ * The *checkpoint* keeps the full course width - see `Gate.halfWidth`. Passing
+ * outside the pylons but inside the course still counts, exactly as it does
+ * around a real buoy course, and that split is what lets the marker be a
+ * legible size without making the circuit harder to complete.
+ */
+const GATE_DRAW_MIN_HALF = 9;
+const GATE_DRAW_MAX_HALF = 12;
+const GATE_DRAW_RATIO = 0.55;
 /**
  * How much of the surface normal the moored furniture actually takes. A float
  * with any draught averages the slope under it, so leaning the full analytic
@@ -352,6 +410,9 @@ const TILT = 0.8;
  */
 const HAZE_NEAR = 190;
 const HAZE_FAR = 880;
+/** The racing line's own, much longer haze. See the note where it is applied. */
+const LINE_HAZE_NEAR = 420;
+const LINE_HAZE_FAR = 1750;
 
 // --- buoys -------------------------------------------------------------------
 /** Corners tighter than this get buoys down their outside edge. */
@@ -493,51 +554,61 @@ function buildPylonGeometry(): THREE.BufferGeometry {
   const dark = PALETTE.hullDark;
   const metal = PALETTE.metal;
   const trim = PALETTE.hullTrim;
-  // The mast carries the span more than twice as high as it used to, so the
-  // float grew with it - a 9 m stick on the old 1.4 m collar would read as a
-  // flagpole balanced on a saucer. The two mid-height steps are structure, not
-  // decoration: they break a very tall taper into readable lengths and give the
-  // silhouette something to be at range other than a line.
+  // Slim. The old profile was a 1.7 m-radius collar under a 9 m mast with three
+  // fluted steps in it, which is a 3.4 m-wide fluted column - architecture. A
+  // gate pylon is a mooring buoy with a spar on it: a 1.24 m float that a boat
+  // could nudge aside, a spar barely thicker than a handrail, and exactly one
+  // mid-height step, which is there so the silhouette has a proportion in it at
+  // range rather than being a bare taper.
+  //
+  // Total 5.6 m from the water to the mast head, plus the lamp. Against a 4.2 m
+  // boat that is furniture you pass, which is the whole point.
   return buildLathe([
-    { y: -2.05, r: 0.50, color: dark },
-    { y: -1.10, r: 1.18, color: dark },
-    { y: -0.26, r: 1.62, color: trim },
-    { y: 0.36, r: 1.70, color: trim },
-    { y: 0.78, r: 1.18, color: dark },
-    { y: 1.20, r: 0.74, color: metal },
-    { y: 3.40, r: 0.64, color: metal },
-    { y: 3.72, r: 0.86, color: dark },
-    { y: 4.04, r: 0.60, color: metal },
-    { y: 6.60, r: 0.52, color: metal },
-    { y: 6.92, r: 0.74, color: dark },
-    { y: 7.24, r: 0.50, color: metal },
-    { y: 9.06, r: 0.44, color: metal },
-    { y: 9.30, r: 0.72, color: dark },
-    { y: 9.46, r: 0.54, color: metal },
+    { y: -1.30, r: 0.20, color: dark },
+    { y: -0.72, r: 0.44, color: dark },
+    { y: -0.20, r: 0.62, color: trim },
+    { y: 0.22, r: 0.62, color: trim },
+    { y: 0.50, r: 0.44, color: dark },
+    { y: 0.72, r: 0.26, color: metal },
+    { y: 2.42, r: 0.22, color: metal },
+    { y: 2.60, r: 0.34, color: dark },
+    { y: 2.78, r: 0.20, color: metal },
+    { y: 4.94, r: 0.17, color: metal },
+    { y: 5.10, r: 0.29, color: dark },
+    { y: 5.24, r: 0.19, color: metal },
+    { y: 5.60, r: 0.16, color: metal },
   ], 10, 'gatePylon');
 }
 
 /** The lamp drum. Its own shader bands it; the geometry is just the form. */
 function buildLampGeometry(): THREE.BufferGeometry {
   const w = PALETTE.neutral;
+  // Sized off the mast head it sits on, not off the old one: a 0.66 m drum on a
+  // 0.16 m spar is a beacon the size of an oil drum.
   return buildLathe([
-    { y: -0.28, r: 0.40, color: w },
-    { y: -0.16, r: 0.62, color: w },
-    { y: 0.16, r: 0.66, color: w },
-    { y: 0.28, r: 0.42, color: w },
+    { y: -0.15, r: 0.18, color: w },
+    { y: -0.09, r: 0.28, color: w },
+    { y: 0.09, r: 0.30, color: w },
+    { y: 0.15, r: 0.19, color: w },
   ], 8, 'gateLamp');
 }
 
-/** A course buoy: witch-hat float with a foam stripe at the waterline. */
+/**
+ * A course buoy: witch-hat float with a foam stripe at the waterline.
+ *
+ * Same correction as the pylons. A 2.4 m-wide, 3 m-tall cone is half a boat and
+ * reads as a channel marker for shipping; this is 1.3 m across and stands 1.7 m
+ * out of the water, which is a racing mark a hull can brush.
+ */
 function buildBuoyGeometry(): THREE.BufferGeometry {
   return buildLathe([
-    { y: -1.45, r: 0.38, color: PALETTE.hullDark },
-    { y: -0.66, r: 0.96, color: PALETTE.hullDark },
-    { y: -0.12, r: 1.22, color: PALETTE.foam },
-    { y: 0.34, r: 1.16, color: PALETTE.foam },
-    { y: 0.82, r: 1.00, color: PALETTE.hullTrim },
-    { y: 1.40, r: 0.70, color: PALETTE.hullTrim },
-    { y: 3.05, r: 0.12, color: PALETTE.gateIdle },
+    { y: -0.82, r: 0.20, color: PALETTE.hullDark },
+    { y: -0.38, r: 0.51, color: PALETTE.hullDark },
+    { y: -0.07, r: 0.65, color: PALETTE.foam },
+    { y: 0.19, r: 0.62, color: PALETTE.foam },
+    { y: 0.46, r: 0.53, color: PALETTE.hullTrim },
+    { y: 0.79, r: 0.37, color: PALETTE.hullTrim },
+    { y: 1.70, r: 0.07, color: PALETTE.gateIdle },
   ], 8, 'courseBuoy');
 }
 
@@ -646,6 +717,10 @@ export class Course {
   private readonly buoyMat: THREE.ShaderMaterial;
   /** Every material that carries the shared fog uniforms. */
   private readonly fogged: THREE.ShaderMaterial[] = [];
+  /** The two shared fog uniform *objects*, written once a frame by `syncFog`. */
+  private readonly fogColorU: THREE.IUniform<THREE.Color>;
+  private readonly fogRangeU: THREE.IUniform<THREE.Vector2>;
+  private readonly lineFogRangeU: THREE.IUniform<THREE.Vector2>;
 
   private readonly scene: THREE.Scene;
   /** Last wave clock seen, so `gridSlots` can place boats on the sea as it is now. */
@@ -684,6 +759,16 @@ export class Course {
     // stays correct until someone changes the fog at runtime.
     const fogColor = { value: PALETTE.skyHorizon.clone() };
     const fogRange = { value: new THREE.Vector2(HAZE_NEAR, HAZE_FAR) };
+    // The ribbon gets its own, much longer range. The furniture haze is tuned
+    // for objects that *reduce to a speck* at distance - a pylon at 800 m is two
+    // pixels and has to leave. The racing line does the opposite: it is a
+    // continuous stroke whose whole job is to describe the shape of a 2.68 km
+    // circuit, and a stroke stays legible at any length. Hazing it on the
+    // pylons' schedule is what left the line as a stub near the boat.
+    const lineFogRange = { value: new THREE.Vector2(LINE_HAZE_NEAR, LINE_HAZE_FAR) };
+    this.fogColorU = fogColor;
+    this.fogRangeU = fogRange;
+    this.lineFogRangeU = lineFogRange;
 
     // --- racing line + start strip ------------------------------------------
     const src = buildRaceLineShaders(LOD_WAVE_COUNT);
@@ -695,46 +780,49 @@ export class Course {
       uChopFade: { value: new THREE.Vector2(CHOP_FADE_START, CHOP_FADE_END) },
       uLift: { value: RIBBON_LIFT },
       uLiftSlope: { value: RIBBON_LIFT_SLOPE },
-      // The racing line owns a hue nothing else in the world is allowed to use.
+      // The racing line is green, and it is the palette's own raceLine green.
       //
-      // It used to be drawn in PALETTE.raceLine, which is the same value as
-      // gateLit and one step off racerP2's livery - so a green shape in frame
-      // could be a gate state, a rival, or the course, and the eye had to work
-      // out which. It is now the visor cyan, and no gate state, no livery and no
-      // HUD accent uses it.
+      // The visor cyan was tried, on the argument that a hue nothing else uses
+      // cannot be confused with a gate state or a livery. It is the wrong
+      // argument, because the sea is already cyan: waterShallow, waterCrest and
+      // foamShade sit within a few degrees of hue of it, so a translucent cyan
+      // stroke over water is a value difference and nothing else, and a value
+      // difference is exactly what the swell shading, the foam and the haze all
+      // eat. The line came out as a white wisp - a scratch on the water.
       //
-      // The obvious alternative was a warm accent, and it was tried first. It
-      // fails for a reason worth writing down: this ribbon is *translucent*, so
-      // whatever it is drawn in gets averaged with the water, and averaging a
-      // warm hue with cyan runs the result straight through grey. Amber at 0.3
-      // over the shallow band measured (146, 212, 154) - a muddy sage that
-      // appears nowhere in the palette. Every blend of this cyan lands on the
-      // palette instead: over deep water it reads as waterMid, over the shallow
-      // band as waterCrest, over foam as foamShade. The line can therefore carry
-      // real weight without ever staining the sea a colour the art does not own.
-      // What separates it from water is not its hue, it is that it is *drawn* -
-      // a hard-stepped sheath, a chevron cut and a hot filament up the middle.
-      uLine: { value: PALETTE.visor.clone() },
-      uHot: { value: PALETTE.foam.clone() },
+      // Green separates from every band of the sea by hue, which survives all
+      // three. The collision with gateLit is real and is handled where it
+      // matters: the gates are pink except for the single lit one, and the lit
+      // gate is a small hard-edged object on a mast while the line is a
+      // continuous stroke lying flat on the water. Nobody confuses a road sign
+      // with the road because they share a colour.
+      uLine: { value: PALETTE.raceLine.clone() },
+      uHot: { value: PALETTE.raceLineHot.clone() },
       uInk: { value: PALETTE.ink.clone() },
       uSun: { value: SUN_DIR.clone() },
       // Core / body / sheath / alpha zero, across |side|. The first three are
       // hard steps; the last is where the soft outer ramp finishes, and it runs
       // well inside the geometry so the strip never shows its own edge.
-      uBands: { value: new THREE.Vector4(0.14, 0.50, 0.72, 1.0) },
+      uBands: { value: new THREE.Vector4(0.20, 0.58, 0.80, 1.0) },
       uChevron: { value: new THREE.Vector2(1 / chevronPeriod, 0.42) },
       uScroll: { value: CHEVRON_SPEED },
       uOpacity: { value: RIBBON_OPACITY },
       uFade: { value: new THREE.Vector2(RIBBON_FADE_START, RIBBON_FADE_END) },
+      uNearFade: { value: new THREE.Vector2(RIBBON_NEAR_GONE, RIBBON_NEAR_FULL) },
       uMode: { value: mode },
       uHalfWidth: { value: half },
       uCheck: { value: new THREE.Vector2(2.4, 2.8) },
       uCameraFar: { value: CAMERA_FAR },
       uFogColor: fogColor,
-      uFogRange: fogRange,
+      uFogRange: lineFogRange,
     });
 
-    const startHalf = this.widthAt(0) * START_WIDEN;
+    // The checkered strip is the start *gate's* line on the water, so it takes
+    // the gate's drawn span rather than the full 26 m course half-width - a
+    // 60 m chequerboard under a 28 m gate reads as two unrelated objects, and
+    // the strip is the one the eye measures the gate against.
+    const startHalf = Math.min(GATE_DRAW_MAX_HALF,
+      Math.max(GATE_DRAW_MIN_HALF, this.widthAt(0) * GATE_DRAW_RATIO)) * START_WIDEN;
 
     this.raceLineMat = new THREE.ShaderMaterial({
       name: 'CourseRaceLine',
@@ -771,6 +859,9 @@ export class Course {
     // The start line is a mark on the course, not a hint about it: it is read
     // once, at speed, and it is allowed to be opaque.
     this.startStripMat.uniforms.uOpacity!.value = 0.92;
+    // The strip is 6.5 m of course you drive over; a near fade on it would blank
+    // the finish line at the exact moment it is crossed.
+    (this.startStripMat.uniforms.uNearFade!.value as THREE.Vector2).set(0, 0.5);
 
     this.raceLine = new THREE.Mesh(this.buildRibbonGeometry(RIBBON_HALF, 0, this.totalLength), this.raceLineMat);
     this.raceLine.name = 'raceLine';
@@ -897,15 +988,24 @@ export class Course {
     // instead of the racer. 0.09 keeps the field reading as lit cloth; the lit
     // gate still gains 0.5 on the pulse and still clears the bloom threshold, so
     // "which gate is mine" is answered by the change rather than by shouting.
-    (this.bannerMat.uniforms.uEmissive!.value as THREE.Vector2).set(0.09, 0.50);
-    // 9 marks along the span, drifting slowly, with the chevron arms swept at
-    // 0.9 of a cell. The drift is a tenth of the old scroll rate: this is course
-    // furniture breathing, not an arrow telling the eye where to go.
-    (this.bannerMat.uniforms.uArrow!.value as THREE.Vector3).set(9, 0.045, 0.9);
+    (this.bannerMat.uniforms.uEmissive!.value as THREE.Vector2).set(0.08, 0.36);
+    // 5 marks along the span, drifting slowly, with the chevron arms swept at
+    // 0.9 of a cell. The count is a *density*, not a number: the span went from
+    // ~50 m to ~21 m, and 9 marks on the short banner is a stripe pattern rather
+    // than a row of signs. The drift is a tenth of the old scroll rate: this is
+    // course furniture breathing, not an arrow telling the eye where to go.
+    (this.bannerMat.uniforms.uArrow!.value as THREE.Vector3).set(5, 0.045, 0.9);
+    // Checker cells on the start/finish banner: 36 along by 2 up is a 0.6 m
+    // square on a 21 m by 1.15 m span. Squares, because a checker whose cells
+    // are four times wider than they are tall reads as a barcode.
+    (this.bannerMat.uniforms.uCheck!.value as THREE.Vector2).set(36, 2);
     // Twist amplitude, waves along the span, rate. Half a radian of twist over
     // three and a bit waves is enough to keep the cel bands moving along the
     // cloth without ever letting the banner look like it is flapping loose.
-    (this.bannerMat.uniforms.uWobble!.value as THREE.Vector3).set(0.42, 19.0, 0.55);
+    // 19 waves was a wavelength of 2.6 m on a 50 m span; on a 21 m span the same
+    // number is a 1.1 m ripple, which is corrugation, not cloth. 8 keeps the
+    // wavelength where it was in metres.
+    (this.bannerMat.uniforms.uWobble!.value as THREE.Vector3).set(0.42, 8.0, 0.55);
     this.lampMat = new THREE.ShaderMaterial({
       name: 'CourseGateLamp',
       glslVersion: THREE.GLSL3,
@@ -1326,7 +1426,12 @@ export class Course {
       const t = i / GATE_COUNT;
       this.pointAt(t, c);
       this.tangentAt(t, d);
-      const halfW = this.widthAt(t) * (i === 0 ? START_WIDEN : 1);
+      const courseHalf = this.widthAt(t);
+      // The checkpoint plane is the course; the drawn marker is a size the eye
+      // can judge. See GATE_DRAW_MIN_HALF.
+      const halfW = courseHalf * (i === 0 ? START_WIDEN : 1);
+      const drawHalf = Math.min(GATE_DRAW_MAX_HALF,
+        Math.max(GATE_DRAW_MIN_HALF, courseHalf * GATE_DRAW_RATIO)) * (i === 0 ? START_WIDEN : 1);
       const rx = -d.z;
       const rz = d.x;
       const center = new THREE.Vector3(c.x, 0, c.z);
@@ -1341,8 +1446,8 @@ export class Course {
       this.gates.push(pub);
       this.gateData.push({
         pub,
-        lx: c.x - rx * halfW, lz: c.z - rz * halfW,
-        rx: c.x + rx * halfW, rz: c.z + rz * halfW,
+        lx: c.x - rx * drawHalf, lz: c.z - rz * drawHalf,
+        rx: c.x + rx * drawHalf, rz: c.z + rz * drawHalf,
       });
     }
   }
@@ -1556,13 +1661,14 @@ export class Course {
   private syncFog(): void {
     const fog = this.scene.fog;
     if (!(fog instanceof THREE.Fog)) return;
-    const u = this.raceLineMat.uniforms;
     // The *colour* is the scene's, always - the course has to arrive at the same
-    // horizon everything else does. The range is the course's own, and is not
-    // read from the scene: see HAZE_NEAR.
-    (u.uFogColor!.value as THREE.Color).copy(fog.color);
-    (u.uFogRange!.value as THREE.Vector2).set(
-      Math.min(HAZE_NEAR, fog.far), Math.min(HAZE_FAR, fog.far));
+    // horizon everything else does. The ranges are the course's own, and are not
+    // read from the scene: see HAZE_NEAR and LINE_HAZE_NEAR. Two uniform objects
+    // now, because the ribbon hazes on a much longer schedule than the pylons.
+    this.fogColorU.value.copy(fog.color);
+    this.fogRangeU.value.set(Math.min(HAZE_NEAR, fog.far), Math.min(HAZE_FAR, fog.far));
+    this.lineFogRangeU.value.set(
+      Math.min(LINE_HAZE_NEAR, fog.far), Math.min(LINE_HAZE_FAR, fog.far));
   }
 
   /** Global dimmer for the racing line - for the results screen or a cinematic. */

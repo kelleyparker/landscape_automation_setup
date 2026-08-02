@@ -11,7 +11,21 @@ import * as THREE from 'three';
  * Import from here. If a colour is missing, add it here first.
  */
 
-const c = (hex: string) => new THREE.Color(hex).convertSRGBToLinear();
+/**
+ * Authored sRGB hex -> linear working colour.
+ *
+ * `new THREE.Color(hex)` ALREADY decodes to the linear working space, because
+ * `ColorManagement.enabled` is true by default from r152 onward. This used to
+ * call `.convertSRGBToLinear()` on top of that, which decoded a second time and
+ * darkened every colour in the game: coral's green channel fell from 0.047 to
+ * 0.0036, and the ink - #101a35 - collapsed from 0.036 blue to 0.0028, i.e. the
+ * flat black the art direction explicitly forbids. Every "muddy", "washed out"
+ * and "black hole" note from the visual review traced back to this one line.
+ *
+ * Do not add a conversion here. The hex is sRGB, the Color is linear, three
+ * handles the encode on output.
+ */
+const c = (hex: string) => new THREE.Color(hex);
 
 export const PALETTE = {
   // --- Ink -----------------------------------------------------------------

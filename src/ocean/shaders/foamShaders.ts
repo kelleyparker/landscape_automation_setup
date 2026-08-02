@@ -18,19 +18,22 @@ import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE } from '../../render/shaders/celCh
  *     bitmap's own 20-70 px discs landed at 15-40 cm in world space and its
  *     dusting of 2 px bubbles landed at a couple of centimetres, so the wake
  *     resolved on screen as a field of near-identical round cells with dithered
- *     interiors - a macro photograph of dish soap. It is now two octaves of
- *     analytic value noise scaled in metres: a primary layer at FOAM_BLOB_M and
- *     a rotated, differently-scaled lace layer, with holes punched by a third.
- *     Blobs are therefore 1-2 m across and read as large drawn silhouettes near
- *     the camera and as fewer, bigger shapes far away - never as stipple. Both
- *     high-frequency layers are faded out analytically once their features drop
- *     under a pixel, so nothing survives as isolated dots.
+ *     interiors - a macro photograph of dish soap. It is now three octaves of
+ *     analytic value noise scaled in metres: a primary layer at FOAM_BLOB_M
+ *     that decides the silhouette, a rotated lace layer and a finer teeth layer
+ *     whose amplitudes are far too small to open or close a region on their own
+ *     and which therefore only scallop the *boundary*, and holes punched by a
+ *     fourth. Blobs are 0.8-1.5 m across and read as large drawn silhouettes
+ *     near the camera and as fewer, bigger shapes far away - never as stipple.
+ *     Every high-frequency layer is faded out analytically once its features
+ *     drop under a pixel, so nothing survives as isolated dots.
  *
  *  3. **Dissipation is erosion, not opacity.** A wake does not get transparent -
- *     it breaks up. The ribbon raises its threshold with age (fastest down the
- *     centreline, so the band hollows out and leaves two Kelvin arms of broken
- *     islands), and only then fades what is left, reaching zero at ~80% of the
- *     ribbon's life.
+ *     it breaks up. Holes open with age and open on the centreline first, the
+ *     threshold climbs with age fastest down that same centreline, and the band
+ *     hollows out into two Kelvin arms of broken islands. Alpha holds at *one*
+ *     until 86% of the ribbon's life, because a half-transparent white ribbon
+ *     over blue water is not a fading wake, it is a pale blue stain.
  *
  *  4. **The G-buffer contract, under blending.** Both materials blend with
  *     SRC_ALPHA / ONE_MINUS_SRC_ALPHA, and WebGL runs that same equation on
@@ -174,64 +177,78 @@ in vec3  vWaveN;
 in vec3  vViewNormal;
 
 // -- mask scales, in world metres ---------------------------------------------
-// The primary layer decides the silhouette. At 1.9 m per cell a thresholded
-// island lands at roughly 1-2 m across, which is 150-300 px at the ten metres
-// or so that the near end of the wake sits from a chase camera - a drawn shape,
-// not a bubble. The lace layer scallops the edge and the hole layer punches the
-// interior; both are analytically faded out once their features fall under a
-// pixel, so at distance the foam simplifies instead of dissolving into dots.
-const float FOAM_BLOB_M = 1.90;
-const float FOAM_LACE_M = 0.72;
-const float FOAM_HOLE_M = 1.20;
-const float NOISE_PERIOD = 32.0;   // cells; 83 m before the primary layer repeats
+// The primary layer decides the silhouette. 1.9 m per cell was too coarse to be
+// a silhouette at all: the near end of a spread wake is only three or four
+// cells wide, so the whole ribbon came out as one lazy smooth-sided amoeba - a
+// spilled liquid, not a drawn shape. At 0.78 m a thresholded island lands at
+// 0.8-1.5 m, which is 150-350 px at the six to ten metres the near wake sits
+// from a chase camera: several distinct shapes across the band, each still far
+// bigger than the 8-25 px bubble cells this replaced. The lace and teeth layers
+// only perturb the *boundary* (their amplitudes are far too small to open or
+// close a region on their own), so they scallop the silhouette without ever
+// degenerating into stipple, and both fade out analytically once their features
+// fall under a pixel.
+const float FOAM_BLOB_M  = 0.78;
+const float FOAM_LACE_M  = 0.33;
+const float FOAM_TEETH_M = 0.145;
+const float FOAM_HOLE_M  = 0.52;
+const float NOISE_PERIOD = 32.0;   // cells; 25 m before the primary layer repeats
 
 // How deep an interior hole cuts, and where the hole layer is cut. Holes are
 // thresholded before they are subtracted, so their rims are hard - a soft hole
-// would read as a smudge in the middle of a white shape.
-const float HOLE_T = 0.66;
-const float HOLE_DEPTH = 1.15;
+// would read as a smudge in the middle of a white shape. The hole layer carries
+// its own second octave for the same reason the silhouette does: a single
+// octave of value noise punches suspiciously round holes, and a round hole with
+// a contour drawn round it is a clip-art bubble.
+const float HOLE_T = 0.60;
+const float HOLE_DEPTH = 1.30;
 
-// How far to probe for the shaded side, in metres. This is the width of the
-// down-sun band, so it is specified in world space and honestly shrinks with
-// distance rather than being locked to a screen width.
-const float SHADE_M = 0.40;
+// How far to probe for the shaded side, in metres, on a sun-facing and on a
+// down-sun facet of the swell. This is the width of the down-sun band, so it is
+// specified in world space and honestly shrinks with distance rather than being
+// locked to a screen width. It has to stay small against FOAM_BLOB_M or the
+// "rim" swallows the shape and the ribbon reads as pale blue rather than white.
+// The wider value is the whole of the swell shading: instead of tinting the
+// body - a third tone, and the thing that turned this into a milk spill - a
+// ribbon segment lying on the back face of a swell simply draws a fatter cool
+// rim. Two tones, one hard step, and the wake still visibly bands over a crest.
+const float SHADE_M = 0.085;
+const float SHADE_DARK_M = 0.30;
 
 // -- thresholds ---------------------------------------------------------------
-// A fresh wake keeps a bit under half the field, an exhausted one keeps nothing:
+// A fresh wake keeps a bit over half the field, an exhausted one keeps nothing:
 // T_SPENT sits above the field's own maximum on purpose, so the tail is
 // guaranteed to erode to bare water rather than thinning to a permanent haze.
-const float T_FRESH = 0.40;
-const float T_SPENT = 0.98;
+const float T_FRESH = 0.22;
+const float T_SPENT = 0.96;
 
 // How much further the threshold climbs at the ribbon's outer lips. Without it
 // the wake would end in two dead-straight ruled lines - the geometry's edges.
 // With it the silhouette is cut by the blob field and comes out scalloped, and
 // the outermost foam breaks into separate clumps.
-const float EDGE_BITE = 0.42;
+const float EDGE_BITE = 0.38;
 
 // Width of the drawn contour, in *fragments*. The aa term below is one
 // fragment's worth of the field, so scaling the inner cut by it locks the line
 // to a fixed screen width - the same couple of pixels under the bow and two
 // hundred metres astern.
-const float INK_PX = 1.9;
-
-// How far above the cut the hot core sits. Unlike the contour this is genuinely
-// a *value* offset: it marks where the whitewater is thick, so it grows and
-// shrinks with the foam rather than hugging its outline.
-const float CORE = 0.24;
+const float INK_PX = 1.5;
 
 /**
- * The foam field: primary blob layer plus a rotated, differently-scaled lace
- * octave. Returned in roughly -0.17 .. 0.95.
+ * The foam field: primary blob layer, a rotated lace octave that scallops the
+ * boundary and a finer teeth octave that bites into it. Returned in roughly
+ * -0.28 .. 1.02.
  */
-float wbFoamField(vec2 q, vec2 sc, float lace) {
+float wbFoamField(vec2 q, vec2 sc, float lace, float teeth) {
   float a = wbVal(q / FOAM_BLOB_M + vec2(sc.x, 0.0), NOISE_PERIOD);
   // 0.868 / 0.497 is 29.8 degrees - an irrational-ish angle against the primary
   // lattice, so the two layers never line up and no single blob silhouette
-  // repeats inside one screen.
+  // repeats inside one screen. The teeth layer is turned the other way again.
   vec2 r = wbSpin(q, 0.868, 0.497);
   float b = wbVal(r / FOAM_LACE_M + vec2(0.0, sc.y), NOISE_PERIOD);
-  return a * 0.78 + (b - 0.5) * 0.44 * lace;
+  vec2 s = wbSpin(q, -0.454, 0.891);
+  float c = wbVal(s / FOAM_TEETH_M + vec2(sc.y, sc.x), NOISE_PERIOD);
+  return a * 0.74 + (b - 0.5) * 0.40 * lace + (c - 0.5) * 0.24 * teeth;
 }
 
 void main() {
@@ -242,19 +259,15 @@ void main() {
   // Metres of world covered by one pixel here. Everything finer than this is
   // faded out rather than left to alias into stipple.
   float fp = max(fwidth(q.x), fwidth(q.y));
-  float lace    = 1.0 - smoothstep(FOAM_LACE_M * 0.26, FOAM_LACE_M * 0.80, fp);
-  float holeLod = 1.0 - smoothstep(FOAM_HOLE_M * 0.26, FOAM_HOLE_M * 0.80, fp);
+  float lace    = 1.0 - smoothstep(FOAM_LACE_M  * 0.30, FOAM_LACE_M  * 0.95, fp);
+  float teeth   = 1.0 - smoothstep(FOAM_TEETH_M * 0.30, FOAM_TEETH_M * 0.95, fp);
+  float holeLod = 1.0 - smoothstep(FOAM_HOLE_M  * 0.30, FOAM_HOLE_M  * 0.95, fp);
 
-  float base = wbFoamField(q, sc, lace);
+  float base = wbFoamField(q, sc, lace, teeth);
   // aa comes from the *smooth* part of the field only. Taking it after the hole
   // subtraction would spike the derivative on every hole rim and blur exactly
   // the edges that are supposed to be hardest.
   float aa = max(fwidth(base) * 1.15, 1e-4);
-
-  vec2 hq = wbSpin(q, 0.612, -0.791) / FOAM_HOLE_M + vec2(sc.y * 0.5, -sc.x * 0.5);
-  float hole = wbVal(hq, NOISE_PERIOD);
-  float haa = max(fwidth(hole) * 1.2, 1e-4);
-  float field = base - HOLE_DEPTH * holeLod * wbCrisp(hole, HOLE_T, haa);
 
   // --- wake structure --------------------------------------------------------
   // A real wake is not a uniform strip. There is a hard bright core of prop wash
@@ -264,7 +277,25 @@ void main() {
   // than as a painted stripe.
   float shoulder = 1.0 - smoothstep(0.10, 0.62, abs(edge - 0.72));
   float centre   = 1.0 - smoothstep(0.0,  0.40, edge);
-  float propWash = 1.0 - smoothstep(0.0,  0.11, vAge);
+  float propWash = 1.0 - smoothstep(0.0,  0.22, vAge);
+
+  // Interior holes. They are what turns "a white band" into "eroding foam", so
+  // they are driven by age and biased onto the centreline: prop wash straight
+  // off the transom is solid, and by halfway through the ribbon's life the
+  // middle of the band is more hole than foam. This and the centreline
+  // threshold lift below are the whole of the dissipation - the alpha stays at
+  // one until the very end, because a half-transparent white ribbon over blue
+  // water is a pale blue stain and that is the failure this replaces.
+  vec2 hq = wbSpin(q, 0.612, -0.791) / FOAM_HOLE_M + vec2(sc.y * 0.5, -sc.x * 0.5);
+  vec2 hq2 = wbSpin(q, 0.290, 0.957) / FOAM_TEETH_M + vec2(-sc.x, sc.y);
+  float hole = wbVal(hq, NOISE_PERIOD) + (wbVal(hq2, NOISE_PERIOD) - 0.5) * 0.22 * teeth;
+  float haa = max(fwidth(hole) * 1.2, 1e-4);
+  // A small constant term so a fresh mass is not a featureless plate - at three
+  // metres from a chase camera one 0.78 m blob covers most of the lower frame,
+  // and the round-1 review called exactly that an ice sheet.
+  float holeAge = 0.22 + 1.00 * smoothstep(0.14, 0.80, vAge);
+  float holeAmt = holeLod * holeAge * (0.62 + 0.60 * centre);
+  float field = base - HOLE_DEPTH * holeAmt * wbCrisp(hole, HOLE_T, haa);
 
   // Cross-wake arcs at the hull's own oscillation scale, so the ribbon carries
   // visible transverse structure instead of one continuous density.
@@ -272,56 +303,62 @@ void main() {
 
   float thresh = mix(T_FRESH, T_SPENT, vAge * vAge)
                + EDGE_BITE * edge * edge                      // scalloped silhouette
-               + centre * 0.40 * smoothstep(0.10, 0.72, vAge) // hollows out with age
-               - centre * 0.26 * propWash                     // hard core off the transom
-               - shoulder * 0.17                              // dense Kelvin arms
-               + arcs * 0.055 * (1.0 - vAge);
+               + centre * 0.46 * smoothstep(0.18, 0.78, vAge) // hollows out with age
+               - centre * 0.34 * propWash                     // hard core off the transom
+               - propWash * 0.12                              // ... solid right across it
+               - shoulder * 0.24                              // dense Kelvin arms
+               + arcs * 0.050 * (1.0 - vAge);
 
   // Weak wakes (idling, coasting) should thin out, not just get transparent.
   thresh += (1.0 - vStrength) * 0.24;
 
   // The swell the ribbon is lying on. jac < 1 means the surface is pinching, so
-  // foam bunches and brightens on the up-face of a crest and thins in a trough -
-  // the wake visibly climbing a swell is most of what makes it read as material
-  // sitting on moving water rather than a decal painted across it.
+  // foam bunches on the up-face of a crest and thins in a trough - the wake
+  // visibly climbing a swell is most of what makes it read as material sitting
+  // on moving water rather than a decal painted across it.
   float crest = 1.0 - smoothstep(0.88, 1.06, vJac);
-  thresh -= crest * 0.16;
-  thresh += (1.0 - crest) * 0.05;
+  thresh -= crest * 0.18;
+  thresh += (1.0 - crest) * 0.06;
 
-  float mOuter = wbCrisp(field, thresh,                aa);
-  float mInner = wbCrisp(field, thresh + aa * INK_PX,  aa);
-  float mCore  = wbCrisp(field, thresh + CORE,         aa);
+  float mOuter = wbCrisp(field, thresh,               aa);
+  // The contour is cut against the *unpunched* field on purpose. Taking it
+  // against the holed field draws a closed loop round every hole, and a small
+  // round hole with a line round it is a clip-art bubble - which is exactly
+  // what the last pass was reported as. Drawn from the base field the ink only
+  // ever appears on the mass's outer silhouette; holes come out as clean hard
+  // bites of open water, which is what punched foam actually looks like. There
+  // is no risk of a stray line inside the water, because ink is only visible
+  // where the foam is opaque and the foam is opaque only where base >= thresh.
+  float mInner = wbCrisp(base,  thresh + aa * INK_PX, aa);
 
-  // The down-sun side. Probing the field one SHADE_M *away* from the sun lands
-  // outside the blob only on its down-sun rim, so the step is a drawn shadow
-  // edge with a hard boundary rather than a dot product smeared over the shape.
+  // The ocean's own lit/unlit split, taken from the wave normal at this spine
+  // point, so the ribbon steps exactly where the water under it does.
+  float waveLit = step(0.10, dot(normalize(vWaveN), uSunDir));
+
+  // The down-sun side. Probing the field a fixed number of metres *away* from
+  // the sun lands outside the blob only on its down-sun rim, so the step is a
+  // drawn shadow edge with a hard boundary rather than a dot product smeared
+  // over the shape. The probe distance is the only thing the swell shading
+  // touches - see SHADE_DARK_M.
   vec2 sunXZ = normalize(uSunDir.xz + vec2(1e-5, 1e-5));
-  float away = wbFoamField(q - sunXZ * SHADE_M, sc, lace);
+  float shadeM = mix(SHADE_DARK_M, SHADE_M, waveLit);
+  float away = wbFoamField(q - sunXZ * shadeM, sc, lace, teeth);
   float mLit = wbCrisp(away, thresh, aa);
 
-  // Alpha decays to zero at 80% of the ribbon's life - about four seconds - on
-  // top of the erosion above, so the tail dissolves into islands and then goes
-  // rather than running off the bottom of frame at full strength.
-  float tailFade = 1.0 - smoothstep(0.38, 0.82, vAge);
-  float alpha = mOuter * tailFade * uOpacity * (0.92 + 0.08 * vStrength);
+  // Opacity holds at one for the first 86% of the ribbon's life and is gone by
+  // the end of it - a shade under four seconds at WAKE_LIFE. By the time it
+  // starts to move the erosion above has already reduced the tail to a scatter
+  // of small islands, so nothing large ever draws at a partial alpha and the
+  // foam never blends with the water into a pale wash.
+  float alpha = mOuter * uOpacity * (1.0 - smoothstep(0.86, 1.0, vAge));
   if (alpha < 0.004) discard;
 
-  // The ocean's own two-band shading, taken from the wave normal at this spine
-  // point, so the ribbon steps darker on the back face of a swell exactly where
-  // the water under it does.
-  float ndl = dot(normalize(vWaveN), uSunDir);
-  float waveLit = step(0.10, ndl);
-
-  // Four flat tones and no gradient anywhere between them: drawn contour, cool
-  // shadow, body, hot lip. The body is deliberately pulled off pure white
-  // towards the shade tone - pure white belongs to the sun-facing crest lip and
-  // the hero rim light, not to eight percent of the frame.
-  vec3 body = mix(uFoamShade, uFoamColor, 0.88);
-  vec3 col = body;
-  col = mix(uFoamShade, col, mLit);                      // down-sun shadow step
-  col = mix(col, uFoamColor, mCore * waveLit);           // sun-facing hot lip
-  col = mix(col, mix(col, uFoamShade, 0.34), 1.0 - waveLit);
-  col = mix(uFoamEdge, col, mInner);                     // contour on the silhouette
+  // Two tones and a drawn contour. Nothing else: the body is PALETTE.foam flat
+  // out, PALETTE.foamShade appears only as the down-sun rim, and there is no
+  // gradient anywhere between them.
+  vec3 col = uFoamColor;
+  col = mix(uFoamShade, col, mLit);   // down-sun shadow step
+  col = mix(uFoamEdge, col, mInner);  // contour on the silhouette and hole rims
 
   gColor = vec4(col, alpha);
   // edgeMask = 0 - see the note at the top of this file. The Sobel pass keeps
@@ -406,22 +443,33 @@ in vec3  vViewNormal;
 // Tone ring boundaries. These are placed on the *geometry's* ring radii (see
 // makeSprayBlob in FoamSystem.ts), so the steps land exactly on triangle edges
 // and come out perfectly clean rather than wobbling through interpolation.
-const float R_CORE = 0.52;
-const float R_BODY = 0.90;
+//
+// They moved a long way out. With the shadow ring at 52% of the radius, half of
+// every droplet was the cool tone and the outer tenth was a contour, so a
+// droplet drawn over the wake read as a pale ring with a lighter middle - a
+// bubble, and with two dozen of them at near-identical sizes, clip-art.
+//
+// The rings are a fixed *fraction* of the radius, which is the real trap: a
+// droplet near the camera gets a proportionally fat ring and so it is the big
+// ones that read as outlined bubbles. At 86% and 95% the two bands are a tenth
+// and a twentieth of the radius, which is a drawn line on a large droplet and
+// vanishes entirely on a small one - the same behaviour the ribbon's contour
+// gets from being specified in fragments.
+const float R_CORE = 0.90;
+const float R_BODY = 0.96;
 
 void main() {
   float alpha = vAlpha * uOpacity;
   if (alpha < 0.008) discard;
 
-  // Three flat tones plus a drawn rim. No falloff, no soft edge, no gaussian
-  // anything: a drawn droplet is a white shape with a cool shadow interior and
-  // a contour. The rim is a deep water blue rather than ink so a droplet that
-  // shrinks to two pixels resolves to a dark *blue* chip and never to a black
-  // one.
-  vec3 col = mix(uFoamShade, uFoamColor, 0.82);
+  // Two flat tones plus a drawn rim. No falloff, no soft edge, no gaussian
+  // anything: a drawn droplet is a white shape with a cool step on its lower
+  // rim and a contour. The rim is a deep water blue rather than ink so a droplet
+  // that shrinks to two pixels resolves to a dark *blue* chip and never to a
+  // black one.
+  vec3 col = uFoamColor;
   col = mix(col, uFoamShade, step(R_CORE, vRadial));
-  col = mix(col, mix(uFoamShade, uFoamEdge, 0.38), step(R_BODY, vRadial));
-  col = mix(col, uFoamColor, (1.0 - step(R_CORE * 0.55, vRadial)) * 0.5);
+  col = mix(col, mix(uFoamShade, uFoamEdge, 0.42), step(R_BODY, vRadial));
   col *= vTint;
 
   gColor = vec4(col, alpha);

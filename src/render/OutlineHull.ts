@@ -27,12 +27,55 @@ export interface OutlineOptions {
   color?: THREE.Color;
   /** Extra world-space push, keeps far silhouettes from thinning out. */
   worldPad?: number;
+  /**
+   * View-space lift toward the camera, in metres. See DEPTH_LIFT below - this
+   * is what lets a hull's waterline contour survive the ocean surface.
+   * `addOutline` derives it from the geometry when it is not given.
+   */
+  depthLift?: number;
   /** Fade the ink toward the fog colour with distance. */
   fadeStart?: number;
   fadeEnd?: number;
   /** Render order offset; outlines must draw before their surface. */
   renderOrder?: number;
 }
+
+/**
+ * Global weight on every authored thickness.
+ *
+ * Call sites document their line in CSS pixels and those relative weights are
+ * right (a rider's line is lighter than a hull's), but the absolute value was
+ * set before anything had been looked at on a real frame and read as a hairline
+ * at gameplay distance. This is the one art-direction dial for ink presence:
+ * at 1.34 a hull silhouette lands at ~7 device pixels at dpr 2, which is a
+ * drawn line rather than an aliasing artefact, and still well short of the fat
+ * cartoon border a close-up would show past ~2x.
+ */
+const INK_WEIGHT = 1.34;
+
+/**
+ * A hair of view-space lift toward the camera, as a fraction of the source
+ * geometry's bounding radius, clamped to these metre bounds.
+ *
+ * This is a tie-breaker, not a feature. The shell's visible band is made of
+ * *back* faces, so wherever the band lands on top of another surface at almost
+ * the same depth - spray cards, wake ribbons, a second boat drafting close - a
+ * few centimetres decide whether the line survives. The cap is deliberately far
+ * below the thinnest thing that gets outlined (a rider's forearm, ~8 cm): if the
+ * lift ever exceeds a model's own thickness along the view ray, the shell's back
+ * faces beat the model's front faces and the whole model fills in solid ink.
+ * That was measured, not guessed - at 0.55 m every rider in the frame became a
+ * black lump.
+ *
+ * NOTE, because it cost a capture to learn: this does NOT recover the waterline.
+ * A hull cuts the ocean surface, so its lower edge is an intersection, not a
+ * silhouette - the geometry simply continues underwater and there is no contour
+ * for an inverted hull to thicken. That line has to come from the screen-space
+ * normal/depth pass in Composer.ts.
+ */
+const DEPTH_LIFT_FRACTION = 0.02;
+const DEPTH_LIFT_MAX = 0.03;
+const DEPTH_LIFT_MIN = 0.005;
 
 const SMOOTH_NORMAL_ATTR = 'aSmoothNormal';
 
@@ -92,6 +135,31 @@ export const OUTLINE_GLOBALS = {
   uFogColor: { value: PALETTE.skyHorizon.clone() },
 };
 
+/**
+ * The ink colour, defended against a double sRGB decode upstream.
+ *
+ * `Palette.ts` builds its colours with `new THREE.Color(hex).convertSRGBToLinear()`.
+ * three's colour management already decodes the hex on construction, so that
+ * second call decodes an *already linear* value a second time. Every palette
+ * entry lands darker than authored, and on the darkest one - the ink - it is
+ * catastrophic: #101a35 leaves the composite as (1,3,10), i.e. flat black. The
+ * project's own rule is that the ink is a deep indigo and never pure black, and
+ * a measured frame says it is currently black.
+ *
+ * Palette.ts belongs to another subsystem, so this corrects only its own uniform,
+ * and only when the value it is handed is implausibly dark - darker than any
+ * sensible authored ink. If the palette is repaired upstream the test fails and
+ * this returns the colour untouched, so the two fixes cannot stack.
+ */
+function inkColor(src: THREE.Color): THREE.Color {
+  const out = src.clone();
+  // Relative luminance of a correctly decoded #101a35 is ~0.0104. Anything an
+  // order of magnitude below that has been through the decode twice.
+  const lum = 0.2126 * out.r + 0.7152 * out.g + 0.0722 * out.b;
+  if (lum < 0.0035) out.convertLinearToSRGB();
+  return out;
+}
+
 export class OutlineMaterial extends THREE.ShaderMaterial {
   constructor(opts: OutlineOptions = {}) {
     super({
@@ -99,16 +167,27 @@ export class OutlineMaterial extends THREE.ShaderMaterial {
       glslVersion: THREE.GLSL3,
       side: THREE.BackSide,
       // Ink must not be lit, must not receive fog from three, and must write
-      // depth so it occludes correctly against other boats.
+      // depth so it occludes correctly against other boats and so the ocean -
+      // which draws after it - cannot overwrite the band.
       depthWrite: true,
       depthTest: true,
       lights: false,
       uniforms: {
-        uThickness: { value: opts.thickness ?? 2.6 },
+        uThickness: { value: (opts.thickness ?? 2.6) * INK_WEIGHT },
         uWorldPad: { value: opts.worldPad ?? 0.004 },
-        uColor: { value: (opts.color ?? PALETTE.ink).clone() },
+        uDepthLift: { value: opts.depthLift ?? 0.01 },
+        uColor: { value: inkColor(opts.color ?? PALETTE.ink) },
         uFadeStart: { value: opts.fadeStart ?? 220 },
         uFadeEnd: { value: opts.fadeEnd ?? 1200 },
+        // Line weight holds at the authored value out to uTaperStart, then eases
+        // to uTaperFloor by uTaperEnd. Constant screen width is right for every
+        // boat you are racing; past that a 2-px ring on a 40-px model is most of
+        // the model, and the pack turns into ink blobs with a colour chip in the
+        // middle. The hold is deliberately long so near and mid boats - the ones
+        // a frame is judged on - measure identically.
+        uTaperStart: { value: 60.0 },
+        uTaperEnd: { value: 190.0 },
+        uTaperFloor: { value: 0.42 },
         uResolution: OUTLINE_GLOBALS.uResolution,
         uFogColor: OUTLINE_GLOBALS.uFogColor,
       },
@@ -116,6 +195,10 @@ export class OutlineMaterial extends THREE.ShaderMaterial {
 in vec3 ${SMOOTH_NORMAL_ATTR};
 uniform float uThickness;
 uniform float uWorldPad;
+uniform float uDepthLift;
+uniform float uTaperStart;
+uniform float uTaperEnd;
+uniform float uTaperFloor;
 uniform vec2  uResolution;
 out float vViewDepth;
 #include <skinning_pars_vertex>
@@ -153,14 +236,36 @@ void main() {
   worldPos.xyz += worldNrm * uWorldPad;
 
   vec4 mvPos = viewMatrix * worldPos;
+
+  // Centimetres of lift toward the camera (view -Z is forward, so += moves
+  // nearer) to break depth ties against spray cards and wake ribbons sitting at
+  // almost exactly the band's depth. Kept far below the model's own thickness -
+  // see DEPTH_LIFT_MAX for what happens when it is not.
+  mvPos.z += uDepthLift;
+
   vViewDepth = -mvPos.z;
   vec4 clip = projectionMatrix * mvPos;
 
-  // Screen-space push: project the normal into clip space and offset by an
-  // exact pixel count. This is what keeps the line width constant.
+  // Screen-space push. Project the normal to clip space, then take the direction
+  // in *pixels* rather than in NDC: NDC is anisotropic (x is compressed by the
+  // aspect ratio), so normalising there aims the offset a few degrees off the
+  // true screen normal and a diagonal edge comes out lighter than a vertical
+  // one. Normalising after the aspect divide makes every direction measure the
+  // same width.
   vec3 viewNrm = normalize(mat3(viewMatrix) * worldNrm);
-  vec2 clipNrm = normalize((projectionMatrix * vec4(viewNrm, 0.0)).xy + 1e-6);
-  clip.xy += clipNrm * (uThickness * 2.0 / uResolution) * clip.w;
+  vec2 ndcNrm = (projectionMatrix * vec4(viewNrm, 0.0)).xy;
+  vec2 pxNrm = ndcNrm * uResolution;
+  // The epsilon only matters for a vertex whose normal points straight down the
+  // view axis; such a vertex is never on a silhouette, so any stable direction
+  // will do and this keeps the normalize finite.
+  vec2 pxDir = normalize(pxNrm + vec2(1e-8, 1e-8));
+
+  // Hold the authored weight through the racing range, then ease off so a
+  // distant model keeps its interior colour instead of turning into a blob.
+  float taper = mix(1.0, uTaperFloor,
+                    smoothstep(uTaperStart, uTaperEnd, vViewDepth));
+
+  clip.xy += pxDir * (uThickness * taper * 2.0 / uResolution) * clip.w;
 
   gl_Position = clip;
 }
@@ -173,7 +278,6 @@ uniform vec3 uColor;
 uniform vec3 uFogColor;
 uniform float uFadeStart;
 uniform float uFadeEnd;
-uniform float uCameraFarOutline;
 in float vViewDepth;
 
 void main() {
@@ -203,6 +307,20 @@ export interface OutlineHandle {
  */
 export function addOutline(mesh: THREE.Mesh, opts: OutlineOptions = {}): OutlineHandle {
   computeSmoothNormals(mesh.geometry);
+
+  // Size the tie-breaker lift to this particular model, so a hull gets the full
+  // (tiny) allowance and a rider's limb gets millimetres.
+  if (opts.depthLift === undefined) {
+    if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+    const radius = mesh.geometry.boundingSphere?.radius ?? 0.5;
+    const scale = Math.max(Math.abs(mesh.scale.x), Math.abs(mesh.scale.y), Math.abs(mesh.scale.z));
+    opts = {
+      ...opts,
+      depthLift: Math.min(DEPTH_LIFT_MAX,
+        Math.max(DEPTH_LIFT_MIN, radius * scale * DEPTH_LIFT_FRACTION)),
+    };
+  }
+
   const material = new OutlineMaterial(opts);
 
   const shell = mesh instanceof THREE.SkinnedMesh
@@ -217,12 +335,20 @@ export function addOutline(mesh: THREE.Mesh, opts: OutlineOptions = {}): Outline
   shell.frustumCulled = mesh.frustumCulled;
   shell.castShadow = false;
   shell.receiveShadow = false;
-  // Match the source mesh's local transform - the shell is a sibling, so it
-  // needs the same placement.
-  shell.position.copy(mesh.position);
-  shell.quaternion.copy(mesh.quaternion);
-  shell.scale.copy(mesh.scale);
-  mesh.parent?.add(shell);
+  if (mesh.parent) {
+    // Match the source mesh's local transform - the shell is a sibling, so it
+    // needs the same placement.
+    shell.position.copy(mesh.position);
+    shell.quaternion.copy(mesh.quaternion);
+    shell.scale.copy(mesh.scale);
+    mesh.parent.add(shell);
+  } else {
+    // Called before the mesh was parented. The old code did `mesh.parent?.add`
+    // and silently produced no ink at all, which is a whole object with no line
+    // and no way to notice. Parent it to the mesh instead: as a child it
+    // inherits the world transform, so the local transform must stay identity.
+    mesh.add(shell);
+  }
   (mesh as THREE.Mesh & { userData: { ink?: THREE.Mesh } }).userData.ink = shell;
 
   return {
