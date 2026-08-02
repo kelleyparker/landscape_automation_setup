@@ -37,19 +37,20 @@ export interface RiderOptions {
 const RIDER_INK_PX = 2.1;
 
 /**
- * Where the rider actually stands, relative to `boat.riderMount`.
+ * THERE IS NO STANCE OFFSET, AND THERE MUST NOT BE ONE AGAIN.
  *
- * The mount is placed at the *hip* station on the footwell floor, but the yoke
- * grips are 0.72m forward of it. A standing figure whose feet are on the mount
- * cannot reach them from any pose - measured, the wrists came up 0.46m short and
- * the hands hung in open air beside the bars. Moving the stance forward inside
- * the footwell (which runs to z = +0.90 in boat space) closes most of that gap;
- * the racing fold and the arm length close the rest.
+ * This used to be 0.38 m of forward shove applied to the whole figure, because
+ * the boat's mount and its yoke grips disagreed by 0.72 m and something had to
+ * absorb it. It absorbed it visibly: the rider stood on the coaming rather than
+ * in the footwell, and the arm chain had to be stretched to 0.546 m on top.
  *
- * This is a stance offset, not a fudge: a stand-up racer stands directly behind
- * the column with the bars over their knees, not a metre back on the transom.
+ * `boat.riderMount` is now placed where a rider actually stands - soles on the
+ * well floor, directly behind the steering column - and the grips are set from
+ * that same measurement (see the SEAT_LOCAL block in BoatMesh). The rig's origin
+ * goes on the mount, unmodified. If the hands ever miss the bars again, the
+ * answer is in those two constants, not here.
  */
-const STANCE_FORWARD = 0.38;
+const STANCE_FORWARD = 0;
 
 export class Rider {
   readonly index: number;

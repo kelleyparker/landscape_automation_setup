@@ -239,9 +239,12 @@ export class RiderAnimator {
         l2: hand.position.length(),
         side,
         handle: null,
-        // Fallback bar, in rig-local space. Matches the boat's real grips once
-        // the rig root has been pushed forward toward the yoke by Rider.ts.
-        fx: side * 0.265, fy: 0.505, fz: 0.435,
+        // Fallback bar, in rig-local space, for a boat that exposes no yoke.
+        // These are the shipped hull's grips measured from `riderMount`:
+        // BoatMesh puts them at (+/-0.26, 1.02, 0.56) in boat space with the
+        // mount at (0, 0.21, 0.06), and the rig root sits on the mount with no
+        // offset of its own. Keep the three numbers in step with that block.
+        fx: side * 0.26, fy: 0.81, fz: 0.50,
       });
       this.legs.push({ thigh: b[`thigh${S}`]!, shin: b[`shin${S}`]!, foot: b[`foot${S}`]!, side });
     }
@@ -361,20 +364,19 @@ export class RiderAnimator {
     // while airborne (knees come up, body extends). The landing spring is added
     // on top so a slam always compresses from wherever the pose already was.
     //
-    // The numbers here are much deeper than a naturalistic standing pose, and
-    // that is deliberate on two counts. First, the boat's yoke sits 0.72m
-    // forward of the rider's feet and only 0.485m above them - a rider standing
-    // anywhere near upright cannot physically hold it, which is why the hands
-    // were 45cm off the bars. Second, an upright figure seen from behind is a
-    // vertical rectangle; a folded one is a wedge with a visible back, a head
-    // that breaks the line and arms that leave the body. The crouch is doing
-    // silhouette work, not just physics.
-    let crouchT = 0.56 + 0.56 * speed01 + 0.26 * drift + 0.24 * boost;
-    if (preRace) crouchT += 0.30;
+    // These came down by roughly a third. They were pushed that deep because the
+    // boat's yoke used to sit 0.72m forward of the rider's feet and only 0.485m
+    // above them, and only a rider folded almost double could reach it; the
+    // frames showed the resulting crouch as a deformity rather than as a stance.
+    // The grips are now at knuckle-forward chest height (see the SEAT_LOCAL
+    // block in BoatMesh), so the fold only has to do what a fold is for: weight
+    // over the bars, and a wedge rather than a vertical rectangle from behind.
+    let crouchT = 0.30 + 0.34 * speed01 + 0.20 * drift + 0.18 * boost;
+    if (preRace) crouchT += 0.24;
     // Chop keeps the airborne flag flickering on at racing speed; a full 0.42
     // of unweighting per unit of it stood the rider straight back up.
-    crouchT -= 0.26 * air;
-    crouchT -= 0.34 * celeb;
+    crouchT -= 0.20 * air;
+    crouchT -= 0.26 * celeb;
     const crouch = clamp(
       this.sCrouch.step(crouchT, h, 9, 0.85) + this.sLand.value + heaveDip * 2.6,
       -0.15, 1.5,
@@ -419,20 +421,22 @@ export class RiderAnimator {
     // want to follow the bow up a wave face.
     const idleBreath = (1 - speed01) * 0.020 * Math.sin(elapsed * 1.7 + this.bias * 3);
     const pitchT =
-      0.28 + 0.50 * speed01
-      - 0.30 * accelN
-      + 0.36 * crouch
-      + 0.30 * boost
-      - 0.42 * state.pitch
-      - 0.70 * celebBody
+      0.19 + 0.29 * speed01
+      - 0.22 * accelN
+      + 0.20 * crouch
+      + 0.22 * boost
+      - 0.38 * state.pitch
+      - 0.62 * celebBody
       + idleBreath;
-    // ~46 degrees of fold at racing speed, capped at 57. This is a two-sided
+    // ~28 degrees of fold at racing speed, capped at 41. This is a two-sided
     // constraint, not a free dial. Too shallow and the shoulders stay too high
     // and too far back for the hands to find the bars at all. Too deep and the
     // back turns square-on to a chase camera that already looks slightly down,
     // which hands the frame one large flat plate of suit colour - the same slab
     // read the fold was supposed to break, arriving from the other direction.
-    const pitchLean = this.sPitch.step(clamp(pitchT, -0.55, 1.00), h, 8.5, 0.7);
+    // It was 46 degrees rising to a 57 degree cap, which is a rider bent over
+    // the bars of a boat whose bars were at knee height. They are not any more.
+    const pitchLean = this.sPitch.step(clamp(pitchT, -0.45, 0.72), h, 8.5, 0.7);
 
     // Kept small on purpose: a big shrug plus a forward lean swallows the head.
     const shrug = this.sShrug.step(0.02 + 0.13 * crouch + 0.42 * celebBody + 0.08 * air, h, 11, 0.8);
@@ -518,16 +522,17 @@ export class RiderAnimator {
       + 0.06 * Math.sin(elapsed * 0.47 + this.bias * 5.5);
     const headYaw = this.sHeadYaw.step(clamp(headYawT, -0.9, 0.9), h, 16, 0.75);
     const headPitchT =
-      // The deeper the fold, the further the chin has to come up to keep the
-      // eyes on the water - and the more of the visor the camera gets.
-      -0.05 + 0.16 * speed01
-      + 0.14 * boost
-      - 0.30 * air
-      - 0.45 * celebBody
-      + 0.25 * clamp01(-accelN)
+      // Chin carried up and eyes down the course, always. This is most of the
+      // "attitude" in the pose: a head that tracks the spine reads as cargo, a
+      // head held against it reads as someone driving.
+      -0.14 + 0.12 * speed01
+      + 0.12 * boost
+      - 0.28 * air
+      - 0.42 * celebBody
+      + 0.22 * clamp01(-accelN)
       // Chin comes UP as the back goes down, or a folded rider stares at the
       // footwell and the camera gets the top of a helmet instead of a visor.
-      - 0.30 * clamp01(pitchLean);
+      - 0.34 * clamp01(pitchLean);
     const headPitch = this.sHeadPitch.step(headPitchT, h, 13, 0.7);
 
     // Neck takes 40% so the head is a two-bone curve, not a swivel on a stick.

@@ -68,23 +68,41 @@ const RING_GROWTH = 1.018;
 // ------------------------------------------------------------------- LOD -----
 
 /**
- * Waves that survive at long range: the two swells and the first mid wave.
- * Beyond ~200 m the rings are wider than the 16.3 m / 8.7 m / 4.9 m layers, so
- * those three are past Nyquist and contribute nothing but aliased normals. Their
- * combined amplitude is 0.49 m of 2.9 m, and the fade is spread over 320 m, so
- * the surface loses them as a gentle smoothing rather than at a visible ring.
+ * The wave LOD is a two-stage cascade, because the mesh's ability to carry a
+ * wavelength keeps falling all the way to the horizon rather than falling once.
+ * Ring spacing is about `0.018 * radius`, and a Gerstner term needs roughly four
+ * rings per wavelength before its normals start jumping between neighbours:
+ *
+ *     4.9 m  -> useless past  ~30 m      8.7 m -> past  ~80 m
+ *    16.3 m  -> useless past ~190 m     27.5 m -> past ~350 m
+ *
+ * So the two chop layers go first (six terms -> four), then the two mid waves
+ * (four -> two), leaving the 78 m and 51 m swells to carry the far sea. The old
+ * single stage dropped three terms at once and then kept the 27.5 m wave alone
+ * for the entire far field at two rings per wavelength, which is exactly where
+ * the drawn surface came apart.
  */
-const LOD_WAVE_COUNT = 3;
+const MID_WAVE_COUNT = 4;
+const FAR_WAVE_COUNT = 2;
 
 /**
  * Where the chop fade runs. It starts well beyond the boats (the CPU buoyancy
  * sampler always uses all six waves, so any difference is a mismatch between what
- * a boat floats on and what is drawn under it) and ends before the rings get wide
- * enough for the surviving mid wave to alias in turn. At 200 m the fade has taken
- * about 0.1 m of height, which at that distance is half a pixel.
+ * a boat floats on and what is drawn under it) and is spread over 300 m, so the
+ * surface loses the two chop layers - 0.21 m of 2.9 m - as a gentle smoothing
+ * rather than at a visible ring.
  */
-const CHOP_FADE_START = 110;
-const CHOP_FADE_END = 430;
+const CHOP_FADE_START = 100;
+const CHOP_FADE_END = 400;
+
+/**
+ * The second stage, over an even longer 660 m so it is even less findable, and
+ * deliberately overlapping the first: two fades that meet edge to edge leave a
+ * plateau between them, and a plateau bounded by two transitions is a ring by
+ * another name.
+ */
+const SWELL_FADE_START = 340;
+const SWELL_FADE_END = 1000;
 
 // -------------------------------------------------------------- look ---------
 
@@ -117,6 +135,19 @@ const FOAM_TILE_B = 41.0;
 const FOAM_TILE_C = 3.7;
 /** Noise tile for the band-edge wobble. Features from ~3 m up. */
 const NOISE_TILE = 14.0;
+/**
+ * The haze-edge wobble's own tile, and it has to be this much coarser.
+ *
+ * The band wobble is read from the 14 m tile, whose fbm base octave puts its
+ * features around 3.5 m; that is right for an edge you meet at ten metres and
+ * catastrophic for one you meet at eight hundred, where a dozen features land
+ * inside a pixel and a hard step through them returns a coin toss per pixel.
+ * That was the pepper across the whole mid-to-far field. At 260 m the same
+ * field's features are ~65 m across - which is also simply the right scale for
+ * the mark, since a haze edge should wobble like a brush stroke and not like
+ * grain - and they stay several pixels wide out to the fog plane.
+ */
+const HAZE_NOISE_TILE = 260.0;
 /** Sparkle tile. Sparse stars, so the repeat is not readable. */
 const SPARKLE_TILE = 26.0;
 /**
@@ -135,21 +166,34 @@ const SPARKLE_FACET_TILE = 7.0;
  * 600 m no single row carries a visible share of the transition.
  */
 const DETAIL_FADE_START = 55;
-const DETAIL_FADE_END = 660;
+const DETAIL_FADE_END = 900;
 
 /**
- * The water's own aerial perspective, which is *not* the scene fog range. Scene
- * fog starts at 260 m and ends at 1750 m, which for a camera two metres off the
- * water leaves the entire readable sea - everything inside a few hundred metres -
- * at full near-field chroma and puts the whole ramp into the last handful of
- * screen rows. Water needs haze far earlier than the course furniture does, and
- * the curve is under 1 so most of it is spent in the first third of the range.
+ * The water's own aerial perspective.
+ *
+ * The near end is the water's own: it needs haze earlier than the course
+ * furniture does, because a wave face at 300 m is already asking the eye to read
+ * five flat tones inside a couple of screen rows. The *far* end is the scene
+ * fog's, read from `THREE.Fog` in `syncFog()` rather than written here, and that
+ * is the point - the sea and every gate, buoy and rival boat floating on it now
+ * arrive at the horizon colour at the same distance. Ending the water's ramp
+ * short of the fog plane was what left the last few hundred metres as one flat
+ * pale slab with fully-saturated course furniture sitting on top of it, and the
+ * slab's outer edge as a hard line against the sky.
+ *
+ * The curve is under 1, so most of the ladder is still spent in the near half of
+ * the range where the sea is legible, and the last steps are stretched out over
+ * the distance where the horizon actually forms.
  */
-const HAZE_NEAR = 90;
-const HAZE_FAR = 1400;
-const HAZE_CURVE = 0.58;
-/** Where the three painted haze layers cut in, in haze-ramp space. */
-const HAZE_EDGES = new THREE.Vector3(0.30, 0.58, 0.84);
+const HAZE_NEAR = 190;
+const HAZE_CURVE = 0.74;
+/**
+ * Where the four painted haze layers cut in, in haze-ramp space. Four and not
+ * three: the last step used to land at 0.84 with everything past it flat, so the
+ * final approach to the horizon - which is most of what a high camera sees - had
+ * no steps left in it at all.
+ */
+const HAZE_EDGES = new THREE.Vector4(0.24, 0.47, 0.68, 0.87);
 
 // -------------------------------------------------------- derived colours ----
 
@@ -166,12 +210,24 @@ const HAZE_EDGES = new THREE.Vector3(0.30, 0.58, 0.84);
  */
 
 /**
- * The two blues in the deep water used to sit twenty units apart in green and
- * blue and nothing else, so a quarter of the frame carried one boundary that was
- * barely legible. The abyss band is pulled toward the palette's violet as well as
- * down in value, so the pair separates by hue and not by value alone.
+ * The interior of a trough: `waterDeep` carried down toward the palette's ink.
+ *
+ * The previous derivation pulled it 20% toward `racerP3` - the violet hull
+ * colour - to buy hue separation from the deep band. In linear terms that is a
+ * brutal move: `racerP3` has more red than green, so a fifth of it is enough to
+ * invert the two channels, and the darkest fifth of the sea came out of the frame
+ * as plum. On a wide shot those read as oil slicks lying on the water rather than
+ * as deep water, because nothing else in the sea is anywhere near that hue.
+ *
+ * `ink` is the palette's own deep indigo and is what everything else in the game
+ * darkens toward, so the band stays unambiguously water, keeps `waterDeep`'s
+ * blue-dominant channel order at every mix, and still separates from it - by
+ * value, and by the small drop in chroma that going toward the ink brings with
+ * it. There is no path from here to a warm hue: the darkest input is bluer than
+ * the lightest, the water ramp's shadow step is cool, and both fresnel targets
+ * are sky colours.
  */
-const BAND_ABYSS = PALETTE.waterDeep.clone().lerp(PALETTE.racerP3, 0.20).multiplyScalar(0.74);
+const BAND_ABYSS = PALETTE.waterDeep.clone().lerp(PALETTE.ink, 0.42);
 const BAND_DEEP = PALETTE.waterDeep.clone();
 /** Subsurface note in the trough floor: the shallow cyan pulled into the navy. */
 const DEEP_TINT = PALETTE.waterDeep.clone().lerp(PALETTE.waterShallow, 0.34);
@@ -322,6 +378,7 @@ export class Ocean {
       uOrigin: { value: new THREE.Vector2() },
       uTime: { value: 0 },
       uChopFade: { value: new THREE.Vector2(CHOP_FADE_START, CHOP_FADE_END) },
+      uSwellFade: { value: new THREE.Vector2(SWELL_FADE_START, SWELL_FADE_END) },
 
       // --- bands ------------------------------------------------------------
       uBandAbyss: { value: BAND_ABYSS.clone() },
@@ -433,15 +490,25 @@ export class Ocean {
       // --- atmosphere / g-buffer --------------------------------------------
       uHazeA: { value: PALETTE.waterMid.clone() },
       uHazeB: { value: PALETTE.waterMid.clone() },
+      uHazeC: { value: PALETTE.waterMid.clone() },
       uFogColor: { value: PALETTE.skyHorizon.clone() },
       uHazeEdges: { value: HAZE_EDGES.clone() },
-      uHazeJitter: { value: 0.14 },
+      // Wider than it was, because the field it rides is now coarse enough to
+      // carry it: a 65 m wobble at 0.17 reads as a painted edge, where the same
+      // number on a half-metre field read as grain.
+      uHazeJitter: { value: 0.17 },
+      uHazeNoiseScale: { value: 1 / HAZE_NOISE_TILE },
       uFogCurve: { value: HAZE_CURVE },
-      uFogRange: { value: new THREE.Vector2(HAZE_NEAR, HAZE_FAR) },
+      // y is overwritten from the scene fog every frame - see syncFog().
+      uFogRange: { value: new THREE.Vector2(HAZE_NEAR, 1750) },
       uEdgeMask: { value: new THREE.Vector2(0.12, 0.2) },
     };
 
-    const { vertexShader, fragmentShader } = buildWaterShaders(LOD_WAVE_COUNT, WATER_MAX_INTERACTORS);
+    const { vertexShader, fragmentShader } = buildWaterShaders(
+      MID_WAVE_COUNT,
+      FAR_WAVE_COUNT,
+      WATER_MAX_INTERACTORS
+    );
 
     this.material = new THREE.ShaderMaterial({
       name: 'OceanWater',
@@ -517,35 +584,42 @@ export class Ocean {
   }
 
   /**
-   * Builds the water's haze ladder from the sky's *actual* horizon colour, so
-   * the two meet on the same hue instead of the sea arriving at a value it
-   * chose for itself.
+   * Builds the water's haze ladder from the sky's *actual* horizon colour, and
+   * its far plane from the scene fog's, so the sea and everything floating on it
+   * arrive at the horizon together instead of the sea getting there first and
+   * waiting for the course furniture in a flat pale slab.
    *
-   * Only the colour is taken. The range deliberately is not: scene fog is tuned
-   * for course furniture kilometres out, and reusing it left the sea at full
-   * near-field chroma right up to the cut line. The water's own ramp is far
-   * tighter (see HAZE_NEAR / HAZE_FAR).
+   * The near end stays the water's own (HAZE_NEAR): scene fog is tuned for gates
+   * a kilometre out and would leave a wave face at 300 m asking the eye to read
+   * five flat tones inside two screen rows.
    *
-   * The last water tone stops 12% short of the sky's value. That gap is the
-   * whole horizon: without it a pale foam band arriving at the waterline matches
-   * the sky exactly and the line disappears in patches while staying razor-sharp
-   * elsewhere, which reads worse than either extreme.
+   * The last water tone now stops about 4% short of the sky's value rather than
+   * 12%. Some gap has to survive - without any, a pale foam band arriving at the
+   * waterline matches the sky exactly and the line disappears in patches while
+   * staying razor sharp elsewhere, which reads worse than either extreme - but
+   * an eighth of a stop was not a horizon, it was a wall, and it was the hard
+   * line the sea was ending on.
    */
   private syncFog(): void {
     const fog = this.scene.fog;
     if (!(fog instanceof THREE.Fog)) return;
     const skyH = fog.color;
+    (this.uniforms.uFogRange!.value as THREE.Vector2).set(HAZE_NEAR, fog.far);
     (this.uniforms.uFogColor!.value as THREE.Color)
       .copy(skyH)
-      .lerp(PALETTE.waterShallow, 0.16)
-      .multiplyScalar(0.88);
-    // Two intermediate layers: chroma leaves before value does.
+      .lerp(PALETTE.waterShallow, 0.10)
+      .multiplyScalar(0.96);
+    // Three intermediate layers: chroma leaves before value does, and the last
+    // of them sits close enough to the sky that the final step is a hairline.
     (this.uniforms.uHazeA!.value as THREE.Color)
       .copy(PALETTE.waterMid)
-      .lerp(skyH, 0.40);
+      .lerp(skyH, 0.32);
     (this.uniforms.uHazeB!.value as THREE.Color)
       .copy(PALETTE.waterMid)
-      .lerp(skyH, 0.74);
+      .lerp(skyH, 0.60);
+    (this.uniforms.uHazeC!.value as THREE.Color)
+      .copy(PALETTE.waterMid)
+      .lerp(skyH, 0.84);
   }
 
   /**

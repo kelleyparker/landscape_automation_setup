@@ -10,14 +10,18 @@ import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE } from '../../render/shaders/celCh
  *  1. **Nothing here is physical.** There is no scattering integral, no Mie/
  *     Rayleigh split, no sun radiance. The sky is a painted backdrop: a curve
  *     through three palette colours, chopped into flat bands where a background
- *     painter would have laid flat blocks, and left smooth only where a wash
- *     belongs (the zenith).
+ *     painter would have laid flat blocks. Nothing in it is smooth, including
+ *     the zenith.
  *
  *  2. **The dome and the flare share one sun.** The disc is drawn by testing the
  *     angle between the view ray and `uSunDir`; the flare is anchored by
  *     projecting the *same* vector to NDC with w = 0. A directional light has no
  *     parallax, so both land on the same pixel by construction - there is no way
- *     for the drawn sun and the lighting sun to disagree.
+ *     for the drawn sun and the lighting sun to disagree. Neither is ever in
+ *     shot: SUN_DIR is 43 degrees up and every camera the game owns looks at or
+ *     below the waterline, so the sun's actual contribution to the frame is the
+ *     horizon beam (SKY_BEAM, below) and the disc is what a jump or the results
+ *     orbit reveals when the camera finally tips up to it.
  *
  *  3. **The G-buffer contract, under blending.** WebGL applies the blend
  *     equation to every colour attachment, and each attachment uses *its own*
@@ -74,27 +78,63 @@ in vec3 vDir;
 // progression is what makes a flat backdrop read as a dome - the compression
 // near the horizon *is* the perspective.
 //
-// Seven bands, six edges. Only five or six are ever in shot at once (the top of
-// a 72-degree frame aimed at the horizon reaches about 35 degrees).
-const float SKY_EDGE[6] = float[6](0.016, 0.048, 0.098, 0.175, 0.295, 0.500);
+// Seven bands, six edges, and ALL SEVEN have to land inside the frame the game
+// actually renders. That is the constraint the previous table missed: the chase
+// and bow cameras sit a few metres above the water looking at the horizon, so a
+// 58-degree frame reaches about 23 degrees of elevation. Edges at 26.5 and 45
+// degrees put the two deepest bands - the only two carrying any real cobalt -
+// permanently out of shot, and what was left on screen was five steps taken
+// entirely out of the pale horizon-to-mid half of the ramp. The whole stack is
+// therefore compressed into the first 18 degrees, where it is seen.
+const float SKY_EDGE[6] = float[6](0.0125, 0.0320, 0.0605, 0.1000, 0.1450, 0.2020);
 // Per-edge waver amplitude: about a quarter of the narrower neighbouring band,
 // so an edge can never touch, cross or swallow its neighbour.
-const float SKY_WOB[6]  = float[6](0.0045, 0.0090, 0.0140, 0.0215, 0.0340, 0.0570);
+const float SKY_WOB[6]  = float[6](0.0031, 0.0048, 0.0071, 0.0098, 0.0112, 0.0142);
 // Each band's fixed position on the horizon -> mid -> zenith ramp. These are the
 // chosen palette entries; nothing between them is ever displayed.
-const float SKY_TONE[7] = float[7](0.058, 0.157, 0.284, 0.444, 0.659, 0.962, 1.000);
-// How far each band is lifted toward the near-white haze colour. Only the two
-// lowest carry any, which is what turns the bottom of the sky into a fog wedge
-// that meets the fogged far water instead of stepping against it - and because
-// the lift is constant across a band, it adds no edge of its own.
-const float SKY_HAZE[7] = float[7](0.50, 0.21, 0.06, 0.000, 0.000, 0.000, 0.000);
+//
+// Chosen for an even VALUE staircase rather than an even parameter step: the
+// seven bands land at roughly luma 233 / 202 / 170 / 142 / 118 / 96 / 73, i.e.
+// six steps of 22-32 with no pair of neighbours closer than a fifth of a stop.
+// Only the first two live in the pale horizon-to-mid half; everything from the
+// third up is on the mid-to-zenith leg, which is what puts saturated blue and
+// finally deep cobalt back into the frame instead of a stack of greys.
+const float SKY_TONE[7] = float[7](0.030, 0.250, 0.402, 0.542, 0.747, 0.896, 1.000);
+// How far each band is lifted toward the near-white haze colour. ONLY the two
+// lowest carry any, and far less than before: the lift is what makes the bottom
+// of the sky meet the fogged far water without a step, but at half a unit on the
+// bottom band and a fifth on the one above it, it was not a lift, it was the
+// whole lower sky. The horizon band is meant to read as a deliberate light band
+// with a hard edge under it, not as a haze that eats three bands.
+const float SKY_HAZE[7] = float[7](0.30, 0.06, 0.000, 0.000, 0.000, 0.000, 0.000);
 // And how far it is warmed toward the sun's own gold. Warmth belongs to the
 // bands, not to a compass sector: an azimuthal wash needs an edge somewhere, and
 // wherever that edge lands it is a vertical seam in a sky made of horizontals.
 // Because the whole band stack rises toward the sun (see 'lift' below), warm
 // bands sit visibly higher on the sun's side, which is the light cue - drawn
 // with the same steps as everything else instead of painted over them.
-const float SKY_WARM[7] = float[7](0.19, 0.09, 0.03, 0.000, 0.000, 0.000, 0.000);
+const float SKY_WARM[7] = float[7](0.14, 0.03, 0.000, 0.000, 0.000, 0.000, 0.000);
+
+// -- the sun's in-frame evidence ----------------------------------------------
+// SUN_DIR sits 43 degrees above the horizon. No camera this game owns ever
+// frames it: the chase and bow rigs look at the waterline through a 58-degree
+// frame and the aerial rig looks down. The disc and the flare below are drawn
+// correctly and are simply never seen, which makes them decoration rather than
+// art direction - so the sun's presence is stated down where the player is
+// actually looking, as a wedge of hot light stacked on the horizon on the sun's
+// own azimuth. It is quantised on both axes - four flats of warmth across the
+// compass, and per-band up the elevation - so it lands as painted blocks of
+// light in the same idiom as the sky it sits in, and never as a glow.
+//
+// How much of each band the beam claims, indexed exactly like SKY_TONE. Keying
+// it to the band index rather than to a second elevation ramp matters twice
+// over: the beam introduces no horizontal edge that the band stack does not
+// already have, and it can be kept OFF the saturated bands entirely. Warm light
+// laid at half strength over a mid-blue is neither blue nor gold, it is the
+// lavender-grey that a continuous falloff produced, so the weights are either
+// decisive or nothing - the two pale bands are taken over almost completely, the
+// third gets a whisper, and everything above it is left as painted sky.
+const float SKY_BEAM[7] = float[7](0.95, 0.78, 0.10, 0.000, 0.000, 0.000, 0.000);
 
 // -- sun geometry -------------------------------------------------------------
 // Angular radii in radians. The real sun is 0.0047 rad; every one of these is
@@ -134,11 +174,15 @@ void main() {
   vec3  viewAz   = normalize(vec3(dir.x, 0.0, dir.z) + vec3(1e-5, 0.0, 0.0));
   float axis     = dot(viewAz, sunAzDir);           // +1 into the sun, -1 away
   float sunSide  = max(axis, 0.0);
-  float lift     = 0.052 * pow(sunSide, 1.5);
+  // Scaled down with the band stack. 0.052 was two whole bands of the compressed
+  // table above, which would have shunted the bottom three off the waterline
+  // entirely on the sun's side; 0.020 is still more than the height of the
+  // horizon band itself, so the tilt stays plainly legible.
+  float lift     = 0.020 * pow(sunSide, 1.5);
   // ...and the far side of the compass drops them, so the deep cobalt reaches
   // further down there. Same device, opposite sign: the sky is pale and warm
   // where the light comes from and cold and heavy where it does not.
-  float drop     = 0.026 * pow(max(-axis, 0.0), 1.5);
+  float drop     = 0.011 * pow(max(-axis, 0.0), 1.5);
 
   float p = a01 - lift + drop;
 
@@ -159,6 +203,28 @@ void main() {
   // Gold only where the band under it is already pale: over mid-blue it would
   // make mauve, which is the exact mud this replaced.
   col = mix(col, uSunGlow, SKY_WARM[bi]);
+
+  // --- the sun's in-frame evidence -------------------------------------------
+  // See SKY_BEAM. A wedge of hot light on the horizon on the sun's azimuth,
+  // stepped in four across the compass and four up the elevation, so it reads as
+  // painted flats of light rather than as a bloom. Its sides carry the same slow
+  // waver the band edges do - otherwise the wedge is a ruled vertical seam, and
+  // a vertical seam in a sky built from horizontals is worse than no sun at all.
+  //
+  // The hot tone is the near-white haze colour carried most of the way to the
+  // sun's gold, NOT the gold itself: gold laid straight over mid-blue makes
+  // mauve, and a mauve horizon is the mud this is supposed to replace. Going
+  // through white first keeps every step in the cream-to-gold family.
+  float beamAz = clamp((axis - 0.15) * 1.35, 0.0, 1.0)
+               + 0.05 * sin(a01 * 34.0 + uTime * 0.039);
+  float azStep = floor(clamp(beamAz, 0.0, 1.0) * 4.0) * 0.25;
+  // The four compass steps change how GOLD the light is, not how much of it
+  // there is. Stepping the blend amount instead walks the pale bands through
+  // every half-mixed blue-and-gold on the way out to the wedge's edge, and every
+  // one of those is mud; stepping the hue keeps all four flats inside the
+  // cream-to-gold family and puts a single hard boundary at the wedge's side.
+  vec3  hot = mix(uHazeLift, uSunGlow, 0.20 + 0.62 * azStep);
+  col = mix(col, hot, SKY_BEAM[bi] * step(0.24, azStep));
 
   // Below the horizon the ocean covers everything - except at the very edge of
   // the water mesh, where a gap would otherwise flash bright sky. Sinking to a

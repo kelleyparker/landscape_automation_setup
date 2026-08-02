@@ -67,11 +67,15 @@ export interface BoneSpec {
  * whole figure collapses into one rounded-rectangle silhouette with no daylight
  * between arm and torso. That is precisely the "flat orange slab" failure.
  *
- * ARM LENGTH IS LOAD-BEARING TOO. Shoulder-to-wrist is 0.546m, long for the
- * height on purpose: the yoke grips sit 0.72m forward of the rider's feet and
- * only 0.485m above them, and a naturalistic 0.49m arm simply cannot touch them
- * from any pose a standing rider can hold. Short arms here means hands floating
- * 45cm off the bars, which is what the frames showed.
+ * ARM LENGTH IS NATURAL AGAIN. It was 0.546m shoulder-to-wrist, stretched on
+ * purpose because the boat put its grips 0.72m forward of the rider's feet and
+ * only 0.485m above them - knee height - and nothing with human proportions
+ * could reach that. The boat has since been fixed at the source (see
+ * SEAT_LOCAL and the HANDLE_LOCAL_* block in BoatMesh): the grips are now 0.50m
+ * forward of the soles and 0.81m above them, which from a shoulder at
+ * (+/-0.21, 1.11, 0.20) is a 0.405m reach. 0.480m of arm covers that with the
+ * elbow at about 100 degrees - a relaxed hold, not a lunge. Lengthening this
+ * again would only mean the boat has drifted back out from under it.
  */
 export const RIDER_BONES: readonly BoneSpec[] = [
   { name: 'pelvis', parent: null, offset: [0, 0.86, 0], tail: [0, -0.09, 0] },
@@ -85,14 +89,14 @@ export const RIDER_BONES: readonly BoneSpec[] = [
   { name: 'head', parent: 'neck', offset: [0, 0.105, 0], tail: [0, 0.16, 0.01] },
 
   { name: 'clavR', parent: 'spine2', offset: [0.056, 0.076, 0.010], tail: [0.150, -0.024, 0] },
-  { name: 'upperArmR', parent: 'clavR', offset: [0.150, -0.024, 0], tail: [0, -0.278, 0] },
-  { name: 'foreArmR', parent: 'upperArmR', offset: [0, -0.278, 0], tail: [0, -0.268, 0] },
-  { name: 'handR', parent: 'foreArmR', offset: [0, -0.268, 0], tail: [0, -0.090, 0.022] },
+  { name: 'upperArmR', parent: 'clavR', offset: [0.150, -0.024, 0], tail: [0, -0.245, 0] },
+  { name: 'foreArmR', parent: 'upperArmR', offset: [0, -0.245, 0], tail: [0, -0.235, 0] },
+  { name: 'handR', parent: 'foreArmR', offset: [0, -0.235, 0], tail: [0, -0.082, 0.020] },
 
   { name: 'clavL', parent: 'spine2', offset: [-0.056, 0.076, 0.010], tail: [-0.150, -0.024, 0] },
-  { name: 'upperArmL', parent: 'clavL', offset: [-0.150, -0.024, 0], tail: [0, -0.278, 0] },
-  { name: 'foreArmL', parent: 'upperArmL', offset: [0, -0.278, 0], tail: [0, -0.268, 0] },
-  { name: 'handL', parent: 'foreArmL', offset: [0, -0.268, 0], tail: [0, -0.090, 0.022] },
+  { name: 'upperArmL', parent: 'clavL', offset: [-0.150, -0.024, 0], tail: [0, -0.245, 0] },
+  { name: 'foreArmL', parent: 'upperArmL', offset: [0, -0.245, 0], tail: [0, -0.235, 0] },
+  { name: 'handL', parent: 'foreArmL', offset: [0, -0.235, 0], tail: [0, -0.082, 0.020] },
 
   { name: 'thighR', parent: 'pelvis', offset: [0.107, -0.03, 0], tail: [0, -0.42, 0] },
   { name: 'shinR', parent: 'thighR', offset: [0, -0.42, 0], tail: [0, -0.33, 0] },
@@ -524,6 +528,22 @@ const R_LIMB = 8;   // radial segments on limbs - enough for a clean ink silhoue
  */
 const R_TORSO = 12;
 
+/**
+ * Head scale, applied to every radius and every vertical offset in the head
+ * cluster (skull, jaw, helmet shell, rim, chin bar, visor, crest, hair).
+ *
+ * At 1.0 the helmet was 0.288 m from chin to crown on a 1.63 m figure - 5.7
+ * heads tall, which is a chibi proportion, and against a torso that was itself
+ * too wide it read as a mannequin with a bowling ball on it. 0.87 puts the
+ * figure at 6.4 heads: still stylised-anime, still large enough that the visor
+ * is legible at 60 px, but the head is no longer the first thing the eye lands
+ * on. One number, so nothing in the cluster can drift out of proportion with
+ * the rest of it.
+ */
+const HEAD_S = 0.87;
+/** Vertical offset of the skull's centre above the head bone, already scaled. */
+const HEAD_CY = 0.062 * HEAD_S;
+
 function armPoints(side: number): THREE.Vector3[] {
   const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
   const el = restHeadOf(side > 0 ? 'foreArmR' : 'foreArmL');
@@ -555,16 +575,24 @@ function buildSuit(): THREE.BufferGeometry {
    * The z column bows the section forward through the chest and back through the
    * seat, so the spine is an S in profile rather than a broom handle.
    */
+  /*
+   * The taper is sharper than it was, in both directions. The old profile ran
+   * 0.128 at the hips, 0.150 at the chest and 0.146 across the shoulder yoke -
+   * three numbers within 2 cm of each other, which is a slab whatever the
+   * section's shape is. Widest at the ribs, pinched hard at the waist, and the
+   * yoke ring pulled well in so the deltoid caps below carry the shoulder line
+   * instead of the torso itself squaring off at the top.
+   */
   b.loft(
     [
-      { y: 0.788, rx: 0.110, rz: 0.114, z: -0.016 }, // seat, sat back
-      { y: 0.885, rx: 0.128, rz: 0.126, z: -0.020 }, // hips - narrower than the
+      { y: 0.788, rx: 0.104, rz: 0.110, z: -0.016 }, // seat, sat back
+      { y: 0.885, rx: 0.120, rz: 0.122, z: -0.020 }, // hips - narrower than the
                                                      // shoulder caps, always
-      { y: 0.985, rx: 0.108, rz: 0.114, z: -0.002 }, // waist - pinched hard
-      { y: 1.088, rx: 0.134, rz: 0.146, z: 0.012 },  // lower ribs
-      { y: 1.180, rx: 0.150, rz: 0.158, z: 0.016 },  // chest - deeper than wide
-      { y: 1.252, rx: 0.146, rz: 0.132, z: 0.006 },  // shoulder yoke
-      { y: 1.304, rx: 0.082, rz: 0.078, z: 0.004 },  // neck base
+      { y: 0.985, rx: 0.099, rz: 0.110, z: -0.002 }, // waist - pinched hard
+      { y: 1.088, rx: 0.130, rz: 0.146, z: 0.012 },  // lower ribs
+      { y: 1.180, rx: 0.141, rz: 0.157, z: 0.016 },  // chest - deeper than wide
+      { y: 1.252, rx: 0.128, rz: 0.126, z: 0.006 },  // shoulder yoke, drawn in
+      { y: 1.304, rx: 0.074, rz: 0.072, z: 0.004 },  // neck base
     ],
     R_TORSO, true, true,
   );
@@ -577,7 +605,7 @@ function buildSuit(): THREE.BufferGeometry {
     const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
     const S = side > 0 ? 'R' : 'L';
     b.use([`clav${S}`, `upperArm${S}`, 'spine2']);
-    b.sphere(sh.x - side * 0.014, sh.y + 0.010, sh.z + 0.002, 0.086, 0.088, 0.084, R_TORSO, 5);
+    b.sphere(sh.x - side * 0.014, sh.y + 0.008, sh.z + 0.002, 0.080, 0.082, 0.080, R_TORSO, 5);
   }
 
   // Whole arm, shoulder to wrist, in the racer colour. The forearm was dark at
@@ -592,9 +620,9 @@ function buildSuit(): THREE.BufferGeometry {
     _t.copy(sh).lerp(el, 0.42);
     // Slimmer than the torso by a clear margin: an arm as fat as the ribcage
     // cannot read as a separate form no matter how far out it is held.
-    b.tube([sh, _t.clone(), el], [0.058, 0.061, 0.046], R_LIMB, 0.85, 0.5);
+    b.tube([sh, _t.clone(), el], [0.054, 0.057, 0.043], R_LIMB, 0.85, 0.5);
     b.use([`upperArm${S}`, `foreArm${S}`, `hand${S}`]);
-    b.tube([el, wr], [0.045, 0.036], R_LIMB, 0.4, 0.35);
+    b.tube([el, wr], [0.042, 0.034], R_LIMB, 0.4, 0.35);
   }
 
   for (const side of [1, -1]) {
@@ -644,7 +672,7 @@ function buildGear(): THREE.BufferGeometry {
   // Chest panel - the suit's dark bib. A tall narrow strip rather than a wide
   // rectangle: a wide one reads as a hole punched in the chest.
   b.use(['spine1', 'spine2']);
-  b.box(0, 1.150, 0.148, 0.055, 0.082, 0.018, 0.8, 0.85);
+  b.box(0, 1.150, 0.147, 0.046, 0.086, 0.018, 0.8, 0.85);
 
   /*
    * BACK PLATE. This is the fix for "flat orange slab": from the chase camera
@@ -670,17 +698,19 @@ function buildGear(): THREE.BufferGeometry {
     const sh = restHeadOf(side > 0 ? 'upperArmR' : 'upperArmL');
     const S = side > 0 ? 'R' : 'L';
     b.use([`clav${S}`, `upperArm${S}`, 'spine2']);
-    b.sphere(sh.x - side * 0.012, sh.y + 0.012, sh.z - 0.002, 0.096, 0.094, 0.092, 8, 3,
-      0, Math.PI * 0.54);
+    b.sphere(sh.x - side * 0.012, sh.y + 0.010, sh.z - 0.002, 0.089, 0.085, 0.087, 8, 3,
+      0, Math.PI * 0.56);
   }
 
   // Collar - a standing one, clear of the shoulder ring rather than sunk in it.
+  // The yoke ring under it came in to 0.128, so these came in with it: a collar
+  // that stands 2 cm proud of the shoulders is a neck brace, not a collar.
   b.use(['neck', 'spine2']);
   b.loft(
     [
-      { y: 1.276, rx: 0.120, rz: 0.116, z: 0.005 },
-      { y: 1.330, rx: 0.098, rz: 0.094, z: 0.004 },
-      { y: 1.372, rx: 0.088, rz: 0.084, z: 0.004 },
+      { y: 1.276, rx: 0.108, rz: 0.105, z: 0.005 },
+      { y: 1.330, rx: 0.090, rz: 0.086, z: 0.004 },
+      { y: 1.372, rx: 0.081, rz: 0.077, z: 0.004 },
     ],
     R_TORSO, false, false,
   );
@@ -693,11 +723,11 @@ function buildGear(): THREE.BufferGeometry {
     // closes around the bar. Oversized on purpose - at 60px tall a correctly
     // scaled hand is two pixels and the arm just ends.
     b.use([`foreArm${S}`, `hand${S}`]);
-    b.sphere(wr.x, wr.y - 0.044, wr.z + 0.014, 0.053, 0.060, 0.051, 7, 4);
+    b.sphere(wr.x, wr.y - 0.040, wr.z + 0.013, 0.049, 0.055, 0.047, 7, 4);
     // Cuff, so the wrist is a joint and not a taper into a ball.
     b.use([`foreArm${S}`, `hand${S}`]);
-    b.tube([wr.clone().add(_t.set(0, 0.030, 0)), wr.clone().add(_t.set(0, -0.012, 0))],
-      [0.046, 0.049], R_LIMB, 0, 0);
+    b.tube([wr.clone().add(_t.set(0, 0.028, 0)), wr.clone().add(_t.set(0, -0.011, 0))],
+      [0.043, 0.046], R_LIMB, 0, 0);
   }
 
   for (const side of [1, -1]) {
@@ -728,22 +758,24 @@ function buildGear(): THREE.BufferGeometry {
    * the racer's colour being lucky. The chin bar under the visor is the same
    * trick from the front.
    */
-  const hcy = hd.y + 0.062;
+  const hcy = hd.y + HEAD_CY;
   b.use(['head']);
-  b.sphere(hd.x, hcy, hd.z + 0.004, 0.135, 0.149, 0.139, 10, 2, Math.PI * 0.545, Math.PI * 0.655);
+  b.sphere(hd.x, hcy, hd.z + 0.004, 0.135 * HEAD_S, 0.149 * HEAD_S, 0.139 * HEAD_S,
+    10, 2, Math.PI * 0.545, Math.PI * 0.655);
   // Chin bar: a hard dark shape under the visor opening, front only.
   b.use(['head']);
-  b.sphere(hd.x, hcy, hd.z + 0.004, 0.137, 0.151, 0.141, 6, 2,
+  b.sphere(hd.x, hcy, hd.z + 0.004, 0.137 * HEAD_S, 0.151 * HEAD_S, 0.141 * HEAD_S, 6, 2,
     Math.PI * 0.46, Math.PI * 0.60,
     THREE.MathUtils.degToRad(-46), THREE.MathUtils.degToRad(46));
 
   // Hair: a nape mass under the helmet rim plus two short side locks. Enough to
   // stop the helmet reading as a bald sphere from behind.
   b.use(['head']);
-  b.sphere(hd.x, hd.y + 0.035, hd.z - 0.052, 0.098, 0.092, 0.080, 6, 3);
+  b.sphere(hd.x, hd.y + 0.030, hd.z - 0.046, 0.098 * HEAD_S, 0.092 * HEAD_S, 0.080 * HEAD_S, 6, 3);
   for (const side of [1, -1]) {
     b.use(['head']);
-    b.box(hd.x + side * 0.088, hd.y - 0.012, hd.z + 0.012, 0.022, 0.062, 0.058, 0.7, 0.8);
+    b.box(hd.x + side * 0.077, hd.y - 0.010, hd.z + 0.010,
+      0.020, 0.054, 0.050, 0.7, 0.8);
   }
 
   return b.build('rider_gear');
@@ -758,16 +790,17 @@ function buildSkin(): THREE.BufferGeometry {
   // positions so it cannot drift out of sync if the proportions are retuned.
   const nk = restHeadOf('neck');
   b.use(['neck', 'head', 'spine2']);
-  b.loft([{ y: nk.y - 0.055, rx: 0.053, rz: 0.050 }, { y: hd.y - 0.020, rx: 0.050, rz: 0.047 }], 6, false, false);
+  b.loft([{ y: nk.y - 0.055, rx: 0.049, rz: 0.046 }, { y: hd.y - 0.020, rx: 0.046, rz: 0.043 }], 6, false, false);
 
   // Head: an egg, slightly narrowed at the chin. Anime skulls are wide at the
   // cranium and taper fast below the cheekbone, which is what the ry/rz scaling
   // and the extra ring density in the lower half are doing.
   b.use(['head', 'neck']);
-  b.sphere(hd.x, hd.y + 0.062, hd.z + 0.008, 0.104, 0.124, 0.108, R_TORSO, 6);
+  b.sphere(hd.x, hd.y + HEAD_CY, hd.z + 0.008,
+    0.104 * HEAD_S, 0.124 * HEAD_S, 0.108 * HEAD_S, R_TORSO, 6);
   // Chin/jaw wedge: pushes the silhouette forward under the visor.
   b.use(['head']);
-  b.box(hd.x, hd.y - 0.018, hd.z + 0.062, 0.048, 0.036, 0.036, 0.6, 0.9);
+  b.box(hd.x, hd.y - 0.016, hd.z + 0.054, 0.042, 0.031, 0.031, 0.6, 0.9);
 
   return b.build('rider_skin');
 }
@@ -776,16 +809,18 @@ function buildSkin(): THREE.BufferGeometry {
 function buildHelmet(): THREE.BufferGeometry {
   const b = new SkinBuilder();
   const hd = restHeadOf('head');
-  const cy = hd.y + 0.062;
+  const cy = hd.y + HEAD_CY;
+  const rx = 0.130 * HEAD_S, ry = 0.144 * HEAD_S, rz = 0.134 * HEAD_S;
   b.use(['head']);
   // Back and sides: everything except a 104 degree wedge at the front.
-  b.sphere(hd.x, cy, hd.z + 0.004, 0.130, 0.144, 0.134, 8, 5,
+  b.sphere(hd.x, cy, hd.z + 0.004, rx, ry, rz, 8, 5,
     0, Math.PI * 0.63, THREE.MathUtils.degToRad(52), THREE.MathUtils.degToRad(308));
   // Brow: caps the front above the visor line.
-  b.sphere(hd.x, cy, hd.z + 0.004, 0.130, 0.144, 0.134, 4, 2,
+  b.sphere(hd.x, cy, hd.z + 0.004, rx, ry, rz, 4, 2,
     0, Math.PI * 0.27, THREE.MathUtils.degToRad(-52), THREE.MathUtils.degToRad(52));
   // Crest fin - a hard shape along the crown so the head is not a smooth blob.
-  b.box(hd.x, cy + 0.128, hd.z + 0.012, 0.016, 0.030, 0.090, 0.5, 0.7);
+  b.box(hd.x, cy + 0.128 * HEAD_S, hd.z + 0.010,
+    0.014, 0.028 * HEAD_S, 0.084 * HEAD_S, 0.5, 0.7);
   return b.build('rider_helmet');
 }
 
@@ -794,7 +829,8 @@ function buildVisor(): THREE.BufferGeometry {
   const b = new SkinBuilder();
   const hd = restHeadOf('head');
   b.use(['head']);
-  b.sphere(hd.x, hd.y + 0.062, hd.z + 0.004, 0.134, 0.148, 0.138, 6, 3,
+  b.sphere(hd.x, hd.y + HEAD_CY, hd.z + 0.004,
+    0.134 * HEAD_S, 0.148 * HEAD_S, 0.138 * HEAD_S, 6, 3,
     Math.PI * 0.26, Math.PI * 0.60, THREE.MathUtils.degToRad(-54), THREE.MathUtils.degToRad(54));
   return b.build('rider_visor');
 }
