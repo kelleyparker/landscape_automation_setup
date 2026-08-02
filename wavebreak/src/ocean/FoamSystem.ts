@@ -229,11 +229,18 @@ const _tint = new THREE.Color();
  * Explicitly *not* PALETTE.ink. Foam is a saturated white mass covering a large
  * part of the frame, and a true ink contour inside it punches holes that read as
  * missing geometry rather than as drawing. This is the deep-water blue lifted a
- * quarter of the way toward the foam shadow: a full step darker than anything
+ * sixth of the way toward the foam shadow: a full step darker than anything
  * else in the ribbon, unmistakably a drawn line, and nowhere near zero luma.
  * Derived from the palette, not authored - no literal is introduced here.
+ *
+ * It moved down from a quarter. The contour's job is to separate the foam from
+ * the water it is lying *in*, and a quarter of the way to the foam shadow put it
+ * only about one value step under PALETTE.waterMid - so wherever a wake crossed
+ * mid-blue water the line stopped reading and the mass came out as a cut-out
+ * laid on the surface. A sixth clears the darkest water band the ribbon ever
+ * crosses while staying an unambiguously saturated blue.
  */
-const FOAM_EDGE = PALETTE.waterDeep.clone().lerp(PALETTE.foamShade, 0.25);
+const FOAM_EDGE = PALETTE.waterDeep.clone().lerp(PALETTE.foamShade, 0.16);
 
 /**
  * How far a droplet's tint may travel from foam white toward crest cyan.

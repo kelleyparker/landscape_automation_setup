@@ -78,12 +78,16 @@ const ST_KEEL: readonly number[] =  [-0.30, -0.34, -0.37, -0.38, -0.37, -0.34, -
  * most important number in this file: a chine below the surface is a hard edge
  * nobody ever sees, and it was why the hull used to read as a slab.
  */
-const ST_CHINE: readonly number[] = [ 0.02,  0.00, -0.01,  0.00,  0.02,  0.06,  0.12,  0.20,  0.29,  0.38,  0.47];
+const ST_CHINE: readonly number[] = [ 0.02,  0.00, -0.01,  0.00,  0.02,  0.06,  0.13,  0.22,  0.32,  0.42,  0.52];
 /**
- * Sheer line. Not a ramp: it dips through the cockpit and sweeps hard up to the
- * stem, which is the curve the eye actually uses to tell a boat from a box.
+ * Sheer line. Not a ramp, and not monotonic either: it stands tall at the
+ * transom, drops through the cockpit to its lowest point just aft of amidships,
+ * then sweeps hard up to the stem. Both ends up, the middle down - that double
+ * curve is the single line the eye uses to tell a boat from a box, and the old
+ * table only had half of it (the transom sat 4 cm above the low point, which at
+ * racing distance is nothing).
  */
-const ST_DECK: readonly number[] =  [ 0.40,  0.375, 0.360, 0.355, 0.365, 0.39,  0.43,  0.49,  0.57,  0.65,  0.73];
+const ST_DECK: readonly number[] =  [ 0.50,  0.44,  0.395, 0.365, 0.355, 0.375, 0.425, 0.505, 0.605, 0.705, 0.80];
 /**
  * Bottom-section exponent. `y = keel + deadrise * t^p` across the half-beam:
  * p = 1 is a straight V, and the larger p gets the flatter the middle of the
@@ -98,12 +102,21 @@ const ST_VEE: readonly number[] =   [ 3.00,  2.85,  2.65,  2.40,  2.15,  1.90,  
  */
 const ST_KNUCK: readonly number[] = [ 1.05,  1.06,  1.07,  1.07,  1.07,  1.07,  1.06,  1.05,  1.04,  1.03,  1.01];
 /**
- * Sheer half-width, as a multiple of the chine half-beam. Under 1 throughout:
- * the deck is *narrower* than the hull, so the topside leans inboard as it rises.
- * Tumblehome is what turns a vertical wall into a plane that takes its own band
- * off the ramp, and it is most of the difference between this and a crate.
+ * Sheer half-width, as a multiple of the chine half-beam - i.e. the sign of the
+ * topside's lean. It crosses 1 at the shoulder on purpose.
+ *
+ * Aft of that it is under 1: tumblehome, the deck narrower than the hull, the
+ * topside leaning inboard as it rises. That is what turns a vertical wall into a
+ * plane that takes its own band off the ramp.
+ *
+ * Forward of it the number goes *over* 1 and keeps climbing to 1.18 at the stem:
+ * flare. The entry is a knife at the waterline and a shovel at the sheer, which
+ * is what throws spray outboard instead of straight up the rider's chest, and it
+ * is what makes a bow read as a bow rather than as the pointy end of a wedge.
+ * The whole table used to be tumblehome, and the frames showed a boat whose nose
+ * simply tapered away to nothing.
  */
-const ST_FLARE: readonly number[] = [ 0.88,  0.885, 0.89,  0.895, 0.90,  0.91,  0.925, 0.945, 0.965, 0.985, 1.00];
+const ST_FLARE: readonly number[] = [ 0.88,  0.885, 0.89,  0.90,  0.92,  0.95,  1.00,  1.06,  1.12,  1.16,  1.18];
 /**
  * Longitudinal rake, in metres, applied to a station in proportion to how far
  * *down* the section a point sits: 0 at the sheer, the full value at the keel.
@@ -148,17 +161,52 @@ const WELL_HALF_L = 0.80;
 const WELL_HALF_U = 0.62;
 const WELL_DEPTH = 0.21;
 
-/** Deck cross-section sampling, dense in the middle where the footwell is. */
-const DECK_U: readonly number[] = [1, 0.78, 0.60, 0.44, 0.28, 0.14, 0, -0.14, -0.28, -0.44, -0.60, -0.78, -1];
+/**
+ * Deck cross-section sampling, dense in the middle where the footwell is.
+ *
+ * `+/-0.72` is a seam, not just a sample: it clears the coaming's outer lip
+ * (which reaches u = 0.638) and the deck is split there into a dark centre - the
+ * cockpit well and the two cowls that cap it - and a pair of side decks that
+ * stay in the racer's colour. A wholly dark top costs the boat its identity from
+ * the chase camera, which is where it is seen for the entire race; a wholly
+ * coloured one is the "lumpy bathtub". The seam runs under the trim rail, so the
+ * two lofts meet on a raised crease rather than on a bare join.
+ */
+const DECK_U: readonly number[] = [1, 0.86, 0.72, 0.55, 0.38, 0.20, 0, -0.20, -0.38, -0.55, -0.72, -0.86, -1];
+/** Index of the +0.72 seam in DECK_U, and its mirror. */
+const DECK_SEAM_A = 2;
+const DECK_SEAM_B = 10;
 
-/** Where the rider's hips land, on the floor of the footwell. */
-export const SEAT_LOCAL = new THREE.Vector3(0, 0.235, -0.02);
-/** Steering column pivot; the yoke geometry is built relative to this. */
-export const YOKE_PIVOT_LOCAL = new THREE.Vector3(0, 0.50, 0.84);
-/** Grip centres, in yoke-pivot space. */
-const HANDLE_LOCAL_X = 0.27;
-const HANDLE_LOCAL_Y = 0.22;
-const HANDLE_LOCAL_Z = -0.14;
+/**
+ * Where the rider stands: soles on the floor of the footwell, directly behind
+ * the steering column.
+ *
+ * THIS AND THE THREE HANDLE CONSTANTS BELOW ARE ONE DESIGN, NOT FOUR NUMBERS.
+ * They used to disagree: the mount sat at z = -0.02 and the grips 0.72 m forward
+ * of it and only 0.485 m above it, which is knee height for a standing 1.58 m
+ * rider. The rider subsystem papered over that by shoving the whole figure 0.38 m
+ * forward and stretching the arm chain to 0.546 m, and the result was a
+ * deformity in every frame. The gap is closed here, at the source.
+ *
+ * The geometry that has to add up:
+ *   mount (0, 0.21, 0.06)  - the well floor at the rider's station is y = 0.205
+ *   grips (0, 1.02, 0.56)  - 0.81 m above the soles, 0.50 m forward of them
+ * A 1.58 m figure in a shallow racing fold carries its shoulders at about
+ * (+/-0.21, 1.11, 0.20) in rider space; the wrist target is then 0.405 m away
+ * along a 0.48 m arm, i.e. a relaxed, clearly bent elbow. That is the whole
+ * constraint, and every number in this block is derived from it.
+ */
+export const SEAT_LOCAL = new THREE.Vector3(0, 0.21, 0.06);
+/**
+ * Steering column pivot; the yoke geometry is built relative to this. Buried
+ * inside the forward cowl, so the column visibly grows out of the dash instead
+ * of hanging in front of it.
+ */
+export const YOKE_PIVOT_LOCAL = new THREE.Vector3(0, 0.60, 0.62);
+/** Grip centres, in yoke-pivot space. Boat space: (+/-0.26, 1.02, 0.56). */
+const HANDLE_LOCAL_X = 0.26;
+const HANDLE_LOCAL_Y = 0.42;
+const HANDLE_LOCAL_Z = -0.06;
 
 /**
  * Per-slot silhouette. Four boats in the same class have to be told apart at a
@@ -192,13 +240,37 @@ const FIN: readonly FinSpec[] = [
   { count: 2, spread: 0.17, height: 0.62, chord: 0.26, sweep: 0.30, z: -1.40, tailSpan: 0.24 },
 ];
 
-/** [halfSpan, chord, tipRise, anhedral, tipSweep] for the bow spoiler. */
+/**
+ * [halfSpan, chord, tipRise, anhedral, tipSweep] for the bow spoiler.
+ *
+ * Spans are all inside the deck's own half-width at the wing's station (~0.44 m
+ * there). The previous set ran to 0.52, so the widest slot's wing overhung the
+ * sheer by 8 cm on each side with nothing beneath it - which, with struts that
+ * stopped 3 cm short of the cowl they were supposed to stand on, is exactly how
+ * a trim part ends up reading as a broken crane arm cantilevered off the bow.
+ */
 const SPOILER: readonly (readonly number[])[] = [
-  [0.40, 0.32, 0.070, 0.000, 0.04], // P1 broad straight blade
-  [0.27, 0.46, 0.230, 0.010, 0.26], // P2 narrow swept delta, tips well up
-  [0.52, 0.22, 0.000, 0.130, 0.00], // P3 wide anhedral plank
-  [0.33, 0.36, 0.150, -0.110, 0.12], // P4 gulled mid-span
+  [0.36, 0.30, 0.030, 0.000, 0.04], // P1 broad straight blade
+  [0.26, 0.42, 0.110, 0.010, 0.22], // P2 narrow swept delta, tips up
+  [0.44, 0.22, 0.000, 0.075, 0.00], // P3 wide anhedral plank
+  [0.31, 0.34, 0.075, -0.060, 0.10], // P4 gulled mid-span
 ];
+/**
+ * Wing datum: crown height and station of the spoiler's mid-span.
+ *
+ * 0.80 is *below* the cowl's crown at that station (0.836), and that is the
+ * point: the inner third of the blade is buried in the nose and only the
+ * outboard halves stand proud, so it grows out of the boat instead of hovering
+ * over it. The intersection is a hard crease the edge pass inks for free, which
+ * is the same thing struts were being asked to do and could not.
+ *
+ * It used to sit at 1.03 on two thin posts, and from the bow camera that is a
+ * yellow bar cantilevered into open sky with a plate on the end - the "broken
+ * crane arm". It also competed with the steering yoke, which is the one bar in
+ * that frame that is supposed to read as a bar.
+ */
+const SPOILER_Y = 0.80;
+const SPOILER_Z = 1.62;
 
 // ---------------------------------------------------------------- helpers ----
 
@@ -484,22 +556,43 @@ function deckHalfAt(z: number): number {
   return stationAt(ST_HB, z) * stationAt(ST_FLARE, z);
 }
 
+/**
+ * Deck sections, built once. Shared by three call sites - the hull group's side
+ * decks and end caps, and the dark group's centre deck - so they are cached
+ * rather than rebuilt.
+ */
+let _deckRings: number[][] | null = null;
+function deckRings(): number[][] {
+  if (_deckRings) return _deckRings;
+  const r: number[][] = [];
+  for (let s = 0; s < ST_Z.length; s++) r.push(deckProfile(s));
+  _deckRings = r;
+  return r;
+}
+
+/**
+ * A contiguous run of a ring list's profile, inclusive at both ends. Sub-ranges
+ * keep the parent's `du`, so a sliced loft winds exactly as the whole one does.
+ */
+function sliceRings(rings: readonly number[][], i0: number, i1: number): number[][] {
+  return rings.map((r) => r.slice(i0 * 3, (i1 + 1) * 3));
+}
+
 function buildHullGroup(): THREE.BufferGeometry {
   const m = new Mesher();
   const c = NEUTRAL;
 
   const hullRings: number[][] = [];
-  const deckRings: number[][] = [];
-  for (let s = 0; s < ST_Z.length; s++) {
-    hullRings.push(hullProfile(s));
-    deckRings.push(deckProfile(s));
-  }
+  for (let s = 0; s < ST_Z.length; s++) hullRings.push(hullProfile(s));
+  const deck = deckRings();
 
   // Rings run stern -> bow (dv = +Z), profile runs port -> starboard (du = +X on
   // the bottom), so cross(du, dv) = -Y: outward, because the bottom faces down.
   m.loft(hullRings, c, false, HULL_SKIP);
-  // Deck profile runs starboard -> port, flipping du so the crown faces up.
-  m.loft(deckRings, c, false);
+  // Side decks: the two outboard strips of the deck, in the racer's colour. The
+  // centre belongs to the dark group; see DECK_U.
+  m.loft(sliceRings(deck, 0, DECK_SEAM_A), c, false);
+  m.loft(sliceRings(deck, DECK_SEAM_B, DECK_U.length - 1), c, false);
 
   // Transom and stem caps close the solid. Both faces are planar (all points
   // share the station's z), so a centroid fan is exact rather than approximate.
@@ -509,9 +602,9 @@ function buildHullGroup(): THREE.BufferGeometry {
   // fan has to be reversed to face -Z; seen from ahead the same list runs
   // counter-clockwise and the stem's fan does not. Getting this backwards leaves
   // the boat with a hole where the chase camera spends the entire race looking.
-  m.fan(capOutline(hullRings[0]!, deckRings[0]!), c, true);
+  m.fan(capOutline(hullRings[0]!, deck[0]!), c, true);
   const last = ST_Z.length - 1;
-  m.fan(capOutline(hullRings[last]!, deckRings[last]!), c, false);
+  m.fan(capOutline(hullRings[last]!, deck[last]!), c, false);
 
   buildSponsons(m, c);
   return m.toGeometry('boatHull', false);
@@ -553,10 +646,16 @@ function capOutline(hull: number[], deck: number[]): number[] {
  * you what reaches its transom.
  */
 const SPON_Z: readonly number[] =     [-2.02, -1.40, -0.70,  0.10,  0.85,  1.45,  1.80];
-const SPON_OUT: readonly number[] =   [ 0.90,  1.06,  1.10,  1.08,  0.96,  0.74,  0.50];
+const SPON_OUT: readonly number[] =   [ 0.94,  1.10,  1.14,  1.12,  1.00,  0.78,  0.52];
 const SPON_IN: readonly number[] =    [ 0.70,  0.80,  0.82,  0.80,  0.68,  0.50,  0.32];
-const SPON_TOP: readonly number[] =   [ 0.110, 0.085, 0.085, 0.110, 0.185, 0.290, 0.375];
-const SPON_BOT: readonly number[] =   [-0.120,-0.140,-0.130,-0.090,-0.010, 0.120, 0.240];
+/**
+ * Pod deck. Held a clear 5-8 cm BELOW the hull's knuckle line the whole way, so
+ * the topside overhangs its own sponson and casts a hard horizontal shadow onto
+ * it. When the two lines were level the pod was just a bulge in the flank; the
+ * daylight under the overhang is what makes it a separate form.
+ */
+const SPON_TOP: readonly number[] =   [ 0.055, 0.020, 0.020, 0.050, 0.130, 0.240, 0.335];
+const SPON_BOT: readonly number[] =   [-0.120,-0.145,-0.135,-0.095,-0.015, 0.115, 0.235];
 
 /**
  * The two outboard pods. Their outer edges carry the boat when it leans, and
@@ -649,11 +748,11 @@ const AFT_CREASE: readonly number[] = [2, 6];
  * spine running from the windscreen to the stem rather than a flat lid.
  */
 const FORE_COWL: readonly ShellStation[] = [
-  { z: 0.80, hw: 0.37, base: 0.38, top: 0.84 },
-  { z: 1.12, hw: 0.37, base: 0.42, top: 0.90 },
-  { z: 1.44, hw: 0.33, base: 0.47, top: 0.90 },
-  { z: 1.72, hw: 0.26, base: 0.53, top: 0.84 },
-  { z: 1.96, hw: 0.15, base: 0.61, top: 0.73 },
+  { z: 0.58, hw: 0.40, base: 0.24, top: 0.78 },
+  { z: 0.92, hw: 0.38, base: 0.30, top: 0.86 },
+  { z: 1.30, hw: 0.33, base: 0.40, top: 0.88 },
+  { z: 1.66, hw: 0.25, base: 0.50, top: 0.83 },
+  { z: 1.96, hw: 0.14, base: 0.60, top: 0.74 },
 ];
 
 /**
@@ -670,12 +769,16 @@ const AFT_COWL: readonly ShellStation[] = [
   { z: -0.68, hw: 0.36, base: 0.35, top: 0.68 },
 ];
 
-/** Windscreen rows, bottom to top. The tips sweep aft so the screen wraps. */
-const SCREEN_HW: readonly number[] = [0.40, 0.37, 0.32];
-const SCREEN_Y: readonly number[] = [0.84, 0.97, 1.07];
-const SCREEN_Z: readonly number[] = [0.83, 0.77, 0.70];
-const SCREEN_WRAP: readonly number[] = [0.20, 0.22, 0.24];
-const SCREEN_COLS = 11;
+/*
+ * THERE IS NO WINDSCREEN.
+ *
+ * There used to be: three rows of `PALETTE.visor` at y 0.84-1.07, z 0.70-0.83.
+ * In every captured frame it was a flat pale-blue rectangle pasted across the
+ * rider's belly - it sat exactly where the rider's torso is, it was the fourth
+ * colour on a boat that is allowed three, and a stand-up ski does not have one
+ * anyway. The dash it was bolted to is now the thing the eye reads, and the
+ * steering column grows out of it.
+ */
 
 /** Cockpit coaming: outer/inner offsets from the footwell edge, and its height. */
 const COAM_STEPS = 22;
@@ -758,6 +861,15 @@ function buildDarkGroup(): THREE.BufferGeometry {
   const m = new Mesher();
   const dark = PALETTE.hullDark;
 
+  // Centre deck: the cockpit's own floor and the shelf the two cowls sit on.
+  // `suitDark` rather than `hullDark` - the palette's other navy, one step
+  // lighter. Both cowls are hullDark and they sit *on* this surface; painted the
+  // same value they merged with it into one shapeless dark mass, which is
+  // exactly what the deck was criticised for. Half a value step is enough to
+  // separate them and it does not add a colour to the boat's blocking.
+  // Profile runs starboard -> port, flipping du so the crown faces up.
+  m.loft(sliceRings(deckRings(), DECK_SEAM_A, DECK_SEAM_B), PALETTE.suitDark, false);
+
   for (const [cowl, exp, creases] of [
     [FORE_COWL, 0.55, FORE_CREASE],
     [AFT_COWL, 0.40, AFT_CREASE],
@@ -791,19 +903,6 @@ function buildDarkGroup(): THREE.BufferGeometry {
     m.panel(sgn * 0.33, -0.04, -1.965, -1, 0, 0, 0, 1, 0, 0.095, 0.105, dark);
     m.panel(sgn * 0.33, -0.04, -1.960, 1, 0, 0, 0, 1, 0, 0.095, 0.105, dark);
   }
-
-  // Wraparound screen. Rows run bottom -> top (dv points up and aft) and columns
-  // run port -> starboard, so cross(du, dv) faces forward, out of the cockpit.
-  const rows: number[][] = [];
-  for (let r = 0; r < 3; r++) {
-    const ring: number[] = [];
-    for (let i = 0; i < SCREEN_COLS; i++) {
-      const u = (i / (SCREEN_COLS - 1)) * 2 - 1;
-      ring.push(SCREEN_HW[r]! * u, SCREEN_Y[r]!, SCREEN_Z[r]! - SCREEN_WRAP[r]! * u * u);
-    }
-    rows.push(ring);
-  }
-  m.loft(rows, PALETTE.visor, false);
 
   return m.toGeometry('boatDark', true);
 }
@@ -859,17 +958,28 @@ function buildMetalGroup(): THREE.BufferGeometry {
  */
 function buildYokeGeometry(): THREE.BufferGeometry {
   const m = new Mesher();
-  const c = NEUTRAL;
+  const dark = PALETTE.hullDark;
+  const trim = PALETTE.hullTrim;
   const y = HANDLE_LOCAL_Y;
   const z = HANDLE_LOCAL_Z;
-  // Column: up and aft out of the cowl.
-  m.tube([[0, -0.02, 0.04], [0, 0.10, -0.02], [0, y, z + 0.03]], [0.045, 0.038, 0.032], 6, c);
-  // Crossbar, then a fatter grip on each end.
-  m.tube([[-0.20, y, z], [0, y + 0.015, z + 0.02], [0.20, y, z]], [0.026, 0.028, 0.026], 6, c);
+  // Column. It starts 0.10 m *below* the pivot and 0.10 m forward of it, which
+  // in boat space is (0, 0.50, 0.72) - inside the forward cowl, whose crown at
+  // that station is y = 0.79. So the shaft is born in the dash, breaks its
+  // surface halfway up, and rakes aft to meet the rider. A column that starts at
+  // its own pivot has nothing holding it and reads as a cantilever.
+  m.tube(
+    [[0, -0.10, 0.10], [0, 0.10, 0.055], [0, y - 0.10, -0.01], [0, y, z + 0.015]],
+    [0.062, 0.050, 0.040, 0.036], 8, dark,
+  );
+  // Crossbar, dark like the column...
+  m.tube([[-0.20, y, z], [0, y + 0.018, z + 0.030], [0.20, y, z]], [0.028, 0.030, 0.028], 6, dark);
+  // ...and a trim-coloured grip on each end. The grips are the only part of this
+  // assembly the rider's hands are meant to land on, so they are the only part
+  // that gets a colour of its own - it makes a missed grip obvious at a glance.
   for (const sgn of [-1, 1]) {
-    m.tube([[sgn * 0.19, y, z], [sgn * 0.345, y - 0.01, z - 0.012]], [0.043, 0.040], 6, c);
+    m.tube([[sgn * 0.185, y, z], [sgn * 0.335, y - 0.012, z - 0.016]], [0.042, 0.039], 6, trim);
   }
-  return m.toGeometry('boatYoke', false);
+  return m.toGeometry('boatYoke', true);
 }
 
 // -------------------------------------------------------------- trim group ---
@@ -893,7 +1003,10 @@ const DIGIT_SEGMENTS: readonly (readonly number[])[] = [
 ];
 
 /**
- * A number plate: a cream backing panel with dark strokes standing proud of it.
+ * A number plate: a trim-yellow backing panel with dark strokes standing proud
+ * of it. It used to back onto `hullLight`, and cream was the fourth colour on a
+ * boat that reads best with three - yellow-on-dark is just as legible and the
+ * plate now belongs to the same accent family as the sheer rail and the fin.
  * `u` is the plate's right in view, `v` its up; the face normal is `u x v`, so
  * each call site picks the pair that makes the digit read the right way round
  * from the side it is meant to be seen from.
@@ -908,7 +1021,7 @@ function addPlate(
   const nx = uy * vz - uz * vy;
   const ny = uz * vx - ux * vz;
   const nz = ux * vy - uy * vx;
-  m.panel(ox, oy, oz, ux, uy, uz, vx, vy, vz, hw, hh, PALETTE.hullLight);
+  m.panel(ox, oy, oz, ux, uy, uz, vx, vy, vz, hw, hh, PALETTE.hullTrim);
 
   const segs = DIGIT_SEGMENTS[digit]!;
   // "1" only lights the two right-hand strokes, so it is nudged back to centre.
@@ -948,14 +1061,21 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   //
   // Ordered so cross(du, dv) points out of every face. Rings advance +Z, so the
   // starboard rail lists its outboard edge first and the port rail is reversed.
-  // The band from u = 0.72 to 0.92 is the only strip of deck that is clear of the
-  // footwell inboard and of both cowls all the way fore and aft, so it is the
-  // only place a rail runs unbroken from transom to stem - which is exactly where
-  // a gunwale rail belongs anyway.
+  //
+  // The band straddles u = +/-0.72, which is the seam between the dark centre
+  // deck and the racer-coloured side deck (see DECK_U): the rail is the line
+  // between the two colours rather than a third stripe floating on one of them,
+  // and it hides the join. It also runs unbroken from transom to stem, clear of
+  // the footwell inboard and of both cowls fore and aft.
+  //
+  // Narrower than it was, too. At u = 0.72..0.92 on a deck that now flares to
+  // 1.18 of the chine beam forward, the two rails covered so much of the fore
+  // deck from the chase camera that the boat read as a yellow boat with a dark
+  // stripe rather than the other way round.
   const RAIL_H = 0.024;
   for (const sgn of [-1, 1]) {
-    const uIn = sgn * 0.72;
-    const uOut = sgn * 0.92;
+    const uIn = sgn * 0.655;
+    const uOut = sgn * 0.805;
     const rows: number[][] = [];
     for (let s = 0; s < ST_Z.length - 1; s++) {
       const hb = ST_HB[s]! * ST_FLARE[s]!;
@@ -1026,8 +1146,8 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   for (let i = 0; i <= spanSteps; i++) {
     const u = (i / spanSteps) * 2 - 1;
     const x = u * halfSpan;
-    const y = 1.03 + tipRise * u * u - anhedral * Math.abs(u);
-    const zc = 1.60 - tipSweep * u * u;
+    const y = SPOILER_Y + tipRise * u * u - anhedral * Math.abs(u);
+    const zc = SPOILER_Z - tipSweep * u * u;
     const hc = (chord * 0.5) * (1 - 0.24 * u * u);
     const ht = 0.038;
     wingRings.push([
@@ -1040,21 +1160,18 @@ function buildTrimGroup(index: number): THREE.BufferGeometry {
   m.loft(wingRings, trim, true);
   m.fan(wingRings[0]!, trim, true);
   m.fan(wingRings[spanSteps]!, trim, false);
-  // Endplates. A bare wing at this size is a line in the silhouette and reads as
-  // a stray edge; a plate at each tip closes the shape into something a player
-  // can name, and it is the cheapest per-slot silhouette variation on the boat.
-  for (const s of [-1, 1]) {
-    const x = s * halfSpan;
-    const y = 1.03 + tipRise - anhedral;
-    const zc = 1.60 - tipSweep;
-    const hc = chord * 0.46;
-    m.panel(x + s * 0.012, y + 0.018, zc, 0, 0, -s, 0, 1, 0, hc, 0.058, trim);
-    m.panel(x, y + 0.018, zc, 0, 0, s, 0, 1, 0, hc, 0.058, trim);
-  }
-  // Two struts down onto the cowling, so the wing is carried rather than floating.
-  for (const sgn of [-1, 1]) {
-    m.tube([[sgn * 0.21, 0.82, 1.52], [sgn * 0.21, 1.03, 1.60]], [0.032, 0.026], 5, trim);
-  }
+  /*
+   * NO ENDPLATES, AND NO STRUTS.
+   *
+   * The blade used to carry a flat quad at each tip and stand on two posts. Both
+   * were there to make an elevated wing legible, and neither survives contact
+   * with a camera: the plates are zero-thickness cards that present the lens a
+   * plain brown rectangle whenever they face it, and in the rider shot one of
+   * them was the largest single shape on the foredeck. The blade's root is now
+   * inside the cowl and its tips are closed by the loft's own fans, so it needs
+   * neither. Per-slot silhouette still comes from span, chord, rise, anhedral
+   * and sweep above - and from the dorsal fins, which differ far more.
+   */
 
   // --- number plates -------------------------------------------------------
   // Aft face of the engine cowl: the one the chase camera stares at all race.
@@ -1191,9 +1308,39 @@ let _trimMat: CelMaterial | null = null;
 let _darkMat: CelMaterial | null = null;
 let _metalMat: CelMaterial | null = null;
 
+/**
+ * Rim override, applied to every material on the boat.
+ *
+ * `CEL_PRESETS.hull` opens the fresnel band at a threshold of 0.46 with a
+ * strength of 1.25, and the rim colour is `waterCrest`. On a figure that is
+ * nearly all curvature - a deck crowned across its whole width, a cowl that is
+ * half a cylinder - a threshold that low is not a contour, it is a wash: from
+ * the bow camera the band covered most of the deck and the boat came out with a
+ * broad teal panel on it that belongs to no part of the palette. Measured off
+ * the captured frame, the deck was reading (130, 243, 251) - that is water
+ * crest, on a hull.
+ *
+ * 0.68 puts the band back where it belongs, at grazing angles past ~80 degrees,
+ * and the halved strength keeps it a line rather than a fill. The separation
+ * from the sea that the preset's comment is worried about still happens - it is
+ * just done by the ink line and by the deck being dark now.
+ */
+const BOAT_RIM = {
+  rimThreshold: 0.68,
+  rimWidth: 0.15,
+  rimStrength: 0.62,
+  // Same argument one step along: the preset's 0.55 threshold over a 62-power
+  // lobe puts a broad pale wash on the flared bow panels, which came out of the
+  // frame looking like a chunk of ice welded to the stem.
+  specThreshold: 0.66,
+  specPower: 92,
+  specStrength: 0.58,
+} as const;
+
 function trimMaterial(): CelMaterial {
   return (_trimMat ??= makeCelMaterial({
     ...CEL_PRESETS.hull(NEUTRAL),
+    ...BOAT_RIM,
     vertexColors: true,
     name: 'BoatTrim',
   }));
@@ -1202,13 +1349,21 @@ function trimMaterial(): CelMaterial {
 function darkMaterial(): CelMaterial {
   return (_darkMat ??= makeCelMaterial({
     ...CEL_PRESETS.hull(NEUTRAL),
+    ...BOAT_RIM,
     vertexColors: true,
-    // The windscreen is a single open surface sharing this material with two
-    // closed cowls, so both faces have to draw. On the cowls the back faces are
-    // depth-rejected and cost nothing.
+    // The deck, the coaming and the yoke are open surfaces sharing this material
+    // with two closed cowls, so both faces have to draw. On the cowls the back
+    // faces are depth-rejected and cost nothing.
     side: THREE.DoubleSide,
-    matcapStrength: 0.34,
-    specPower: 80,
+    // The cowls and the centre deck are the largest smooth surfaces on the boat
+    // and they are dark, which is the worst possible host for a broad specular:
+    // at 0.85 strength over a 62-power lobe the highlight came out as a pale
+    // grey puddle sitting on the foredeck like a decal. Tight and weak, so it
+    // reads as a glint on a moulding.
+    matcapStrength: 0.14,
+    specPower: 120,
+    specStrength: 0.45,
+    specThreshold: 0.70,
     name: 'BoatDark',
   }));
 }
@@ -1262,7 +1417,11 @@ export function buildBoatVisual(index: number, color: THREE.Color): BoatVisual {
   // Pitch about local X after yaw about Y, roll last: the vehicle convention.
   root.rotation.order = 'YXZ';
 
-  const hullMaterial = makeCelMaterial({ ...CEL_PRESETS.hull(color), name: `BoatHull${index}` });
+  const hullMaterial = makeCelMaterial({
+    ...CEL_PRESETS.hull(color),
+    ...BOAT_RIM,
+    name: `BoatHull${index}`,
+  });
 
   const hull = new THREE.Mesh(_hullGeo, hullMaterial);
   hull.name = 'hull';
@@ -1279,7 +1438,10 @@ export function buildBoatVisual(index: number, color: THREE.Color): BoatVisual {
   yokePivot.position.copy(YOKE_PIVOT_LOCAL);
   root.add(yokePivot);
 
-  const yoke = new THREE.Mesh(_yokeGeo, metalMaterial());
+  // Vertex-coloured: a dark column and crossbar with trim-yellow grips, so the
+  // yoke stays inside the boat's three-colour blocking instead of adding a
+  // fourth. The dark material already carries vertex colours for the cowls.
+  const yoke = new THREE.Mesh(_yokeGeo, darkMaterial());
   yoke.name = 'yoke';
   yokePivot.add(yoke);
 

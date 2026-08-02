@@ -49,23 +49,25 @@ function patchGeneratedWaveGLSL(src: string): string {
 }
 
 /**
- * A second, reduced-wave evaluator generated from the *same* source of truth.
+ * A reduced-wave evaluator generated from the *same* source of truth.
  *
- * Far from the camera the disc's rings are tens of metres apart, so the 8.7 m and
- * 4.9 m chop layers are below the Nyquist limit of the mesh: keeping them there
- * buys nothing but aliased normals, which the cel bands then amplify into a
- * crawling speckle. Rather than approximate the wave with different numbers -
- * which would be a second definition, and would drift - we ask the *generator*
- * for a version built from the first `count` terms of `TERMS` and rename its
- * symbols so both evaluators can coexist in one translation unit. Nothing about
- * the maths is touched; only the term count differs.
+ * The disc's rings grow geometrically, so at 400 m they are about 7.5 m apart and
+ * at 1000 m about 19 m. A wave shorter than roughly four ring spacings is past
+ * what the mesh can carry: keeping it there buys nothing but aliased normals and
+ * a height field that jumps between neighbouring rings, which the cel bands then
+ * amplify into crawling speckle. Rather than approximate the wave with different
+ * numbers - which would be a second definition, and would drift - we ask the
+ * *generator* for a version built from the first `count` terms of `TERMS` and
+ * rename its symbols so several evaluators can coexist in one translation unit.
+ * Nothing about the maths is touched; only the term count differs.
  */
-function lodGerstnerGLSL(count: number): string {
+function lodGerstnerGLSL(count: number, suffix: string): string {
+  const tag = suffix.toUpperCase();
   return patchGeneratedWaveGLSL(gerstnerGLSL(TERMS.slice(0, count)))
-    .replace(/wbWaveSurface/g, 'wbWaveSurfaceLod')
-    .replace(/wbWaveDisplace/g, 'wbWaveDisplaceLod')
-    .replace(/WB_WAVE_COUNT/g, 'WB_LOD_WAVE_COUNT')
-    .replace(/WB_MAX_WAVE_HEIGHT/g, 'WB_LOD_MAX_WAVE_HEIGHT');
+    .replace(/wbWaveSurface/g, `wbWaveSurface${suffix}`)
+    .replace(/wbWaveDisplace/g, `wbWaveDisplace${suffix}`)
+    .replace(/WB_WAVE_COUNT/g, `WB_${tag}_WAVE_COUNT`)
+    .replace(/WB_MAX_WAVE_HEIGHT/g, `WB_${tag}_MAX_WAVE_HEIGHT`);
 }
 
 /** GLSL float literal, always with a decimal point so the compiler sees a float. */
@@ -80,24 +82,29 @@ export interface WaterShaderSource {
 }
 
 /**
- * @param lodWaveCount how many of the six waves survive at long range
+ * @param midWaveCount terms surviving the first (chop) fade
+ * @param farWaveCount terms surviving the second (mid-wave) fade
  * @param maxInteractors interactor array length; must match the uniform
  */
 export function buildWaterShaders(
-  lodWaveCount: number,
+  midWaveCount: number,
+  farWaveCount: number,
   maxInteractors: number = WATER_MAX_INTERACTORS
 ): WaterShaderSource {
   const vertexShader = /* glsl */ `
 precision highp float;
 
 ${patchGeneratedWaveGLSL(gerstnerGLSL())}
-${lodGerstnerGLSL(lodWaveCount)}
+${lodGerstnerGLSL(midWaveCount, 'Mid')}
+${lodGerstnerGLSL(farWaveCount, 'Far')}
 
 /** Disc centre in world XZ: the camera, snapped to the finest ring spacing. */
 uniform vec2  uOrigin;
 uniform float uTime;
 /** x = distance where the chop starts fading, y = where it is fully gone. */
 uniform vec2  uChopFade;
+/** The second stage: where the mid waves fade out in turn. */
+uniform vec2  uSwellFade;
 
 out vec3  vWorldPos;
 out vec3  vWorldNormal;
@@ -124,30 +131,61 @@ void main() {
   float radial = length(position.xz);
   float viewDist = distance(vec3(p.x, 0.0, p.y), cameraPosition);
   float lodDist = max(radial, viewDist);
-  float detail = 1.0 - smoothstep(uChopFade.x, uChopFade.y, lodDist);
-  vDetail = detail;
+
+  // Two stages, not one. Ring spacing grows as roughly 0.018 * radius, so the
+  // wavelength the mesh can still carry keeps falling all the way out: the two
+  // chop layers (8.7 m, 4.9 m) run out first, then the two mid waves (27.5 m,
+  // 16.3 m), leaving only the swells at the horizon. Doing it in one step meant
+  // the surviving mid waves went on being sampled at two rings per wavelength
+  // for the whole far field, which is where the far sea's normals - and with
+  // them every band, foam and sparkle threshold keyed off them - broke up.
+  //
+  // Both ranges are long and they overlap, so no ring of the disc carries a
+  // visible share of either transition and the two never coincide.
+  float detailChop  = 1.0 - smoothstep(uChopFade.x,  uChopFade.y,  lodDist);
+  float detailSwell = 1.0 - smoothstep(uSwellFade.x, uSwellFade.y, lodDist);
+  vDetail = detailChop;
 
   vec3 pos;
   vec3 nrm;
   float jac;
 
-  // Three-way branch rather than always evaluating both: the near rings and the
-  // far rings each take a single evaluation, and only the transition annulus -
-  // about a third of the rings - pays for two. The branch is coherent across a
-  // ring, so there is no divergence cost worth the name.
-  if (detail >= 0.999) {
+  // Cost is paid only where a fade is actually in progress: the near rings take
+  // one evaluation, the far rings take one, and only the two transition annuli
+  // pay for a second (or, in the thin overlap between them, a third). The
+  // branches are coherent across a ring, so there is no divergence cost worth
+  // the name.
+  if (detailChop >= 0.999) {
     wbWaveSurface(p, uTime, pos, nrm, jac);
-  } else if (detail <= 0.001) {
-    wbWaveSurfaceLod(p, uTime, pos, nrm, jac);
   } else {
-    vec3 posLod;
-    vec3 nrmLod;
-    float jacLod;
-    wbWaveSurfaceLod(p, uTime, posLod, nrmLod, jacLod);
-    wbWaveSurface(p, uTime, pos, nrm, jac);
-    pos = mix(posLod, pos, detail);
-    nrm = normalize(mix(nrmLod, nrm, detail));
-    jac = mix(jacLod, jac, detail);
+    vec3 posBase;
+    vec3 nrmBase;
+    float jacBase;
+    if (detailSwell >= 0.999) {
+      wbWaveSurfaceMid(p, uTime, posBase, nrmBase, jacBase);
+    } else if (detailSwell <= 0.001) {
+      wbWaveSurfaceFar(p, uTime, posBase, nrmBase, jacBase);
+    } else {
+      vec3 posFar;
+      vec3 nrmFar;
+      float jacFar;
+      wbWaveSurfaceFar(p, uTime, posFar, nrmFar, jacFar);
+      wbWaveSurfaceMid(p, uTime, posBase, nrmBase, jacBase);
+      posBase = mix(posFar, posBase, detailSwell);
+      nrmBase = normalize(mix(nrmFar, nrmBase, detailSwell));
+      jacBase = mix(jacFar, jacBase, detailSwell);
+    }
+
+    if (detailChop <= 0.001) {
+      pos = posBase;
+      nrm = nrmBase;
+      jac = jacBase;
+    } else {
+      wbWaveSurface(p, uTime, pos, nrm, jac);
+      pos = mix(posBase, pos, detailChop);
+      nrm = normalize(mix(nrmBase, nrm, detailChop));
+      jac = mix(jacBase, jac, detailChop);
+    }
   }
 
   vWorldPos = pos;
@@ -305,12 +343,15 @@ uniform float uWakeDarken;
 uniform float uWakeFoam;
 
 // --- atmosphere / g-buffer --------------------------------------------------
-/** The sea's own aerial perspective, stepped through three painted layers. */
+/** The sea's own aerial perspective, stepped through four painted layers. */
 uniform vec3  uHazeA;
 uniform vec3  uHazeB;
+uniform vec3  uHazeC;
 uniform vec3  uFogColor;
-uniform vec3  uHazeEdges;
+uniform vec4  uHazeEdges;
 uniform float uHazeJitter;
+/** uv per metre for the haze wobble. Far coarser than the band noise - see main(). */
+uniform float uHazeNoiseScale;
 uniform float uFogCurve;
 uniform vec2  uFogRange;
 /** x = open-water interior line strength, y = extra allowed on the big crests. */
@@ -330,6 +371,47 @@ uniform vec2  uEdgeMask;
 float wbStep(float edge, float x, float minW, float maxW) {
   float w = clamp(fwidth(x) * 0.5, minW, maxW);
   return smoothstep(edge - w, edge + w, x);
+}
+
+/**
+ * How well a repeating field is resolved at this pixel.
+ *
+ * The uv argument is the field's own sampling coordinate and cell is the size of its
+ * largest meaningful feature in those same units. The result is 1 while several
+ * pixels fall inside one feature and falls to 0 once a whole feature fits under
+ * a pixel - past which no threshold on that field can produce anything but a
+ * dither pattern, because the value it is thresholding is a point sample of
+ * something that is already noise at this scale.
+ *
+ * The upper clamp inside wbStep is the other half of the same idea: it lets a
+ * step widen past its own band so the result converges to the average of the two
+ * colours. That works when the field itself is smooth. When the field is a
+ * *texture* it does not, because the mip chain has already replaced the
+ * high-frequency detail with its mean and what remains is a small residual that
+ * still straddles the threshold. So marks driven by a texture scale their
+ * contrast by this instead, and fade into their own local average rather than
+ * breaking into per-pixel static.
+ */
+float wbResolve(vec2 uv, float cell) {
+  float foot = max(fwidth(uv.x), fwidth(uv.y));
+  return 1.0 - smoothstep(cell * 0.30, cell * 1.30, foot);
+}
+
+/**
+ * Threshold width for a drawn mark, and the amount its bar may be biased down
+ * to keep it drawn.
+ *
+ * x = half width of the step. Allowed to grow far past a band so a mark that has
+ *     gone sub-pixel converges to its own coverage average.
+ * y = the "keep it fat" bias, which applies only while the mark is *merely*
+ *     thin. Fattening a mark that has already collapsed under a pixel does not
+ *     rescue it - it just raises the dither's duty cycle - so the bias is
+ *     withdrawn again once the field is genuinely unresolvable.
+ */
+vec2 wbMarkWidth(float field, float clampAmount) {
+  float w = clamp(fwidth(field) * 0.6, 0.004, 1.1);
+  float fat = smoothstep(0.03, 0.22, w) * (1.0 - smoothstep(0.34, 0.85, w)) * clampAmount;
+  return vec2(w, fat);
 }
 
 void main() {
@@ -371,8 +453,29 @@ void main() {
   float foamB = texture(uFoamTex, uvB).r;
   float foamC = texture(uFoamTex, uvC).r;
   float foamTex = foamA * 0.58 + foamB * 0.46;
+  // The drawn blobs are about a tenth of the A tile across, so that is the
+  // feature size the mark thresholds below have to still be able to see.
+  float foamRes = wbResolve(uvA, 0.11);
 
-  vec3 noise = texture(uNoiseTex, (p + uFoamScrollA) * uNoiseScale).rgb;
+  vec2 bandUv = (p + uFoamScrollA) * uNoiseScale;
+  vec3 noise = texture(uNoiseTex, bandUv).rgb;
+  float bandRes = wbResolve(bandUv, 0.25);
+
+  // The haze wobble gets its own, far coarser sample of the same field.
+  //
+  // This is the one edge in the shader that has to stay coherent all the way to
+  // the horizon, and it was the whole distance-aliasing defect: read at the
+  // 14 m band-noise tile its features are about half a metre across, so past a
+  // couple of hundred metres a dozen of them land inside one pixel and a hard
+  // step through it can only ever return a coin toss. That is what covered the
+  // mid-to-far field in pepper. Sampled at tens of metres instead, the same
+  // field's features stay several pixels wide out to the fog plane - which is
+  // also the right scale for the mark: a haze band should wobble like a painted
+  // edge, not like grain - and wbResolve retires it smoothly where even that
+  // finally goes under a pixel, so it dissolves instead of dithering.
+  vec2 hazeUv = (p + uFoamScrollB) * uHazeNoiseScale;
+  float hazeN = texture(uNoiseTex, hazeUv).r;
+  float hazeRes = wbResolve(hazeUv, 0.25);
 
   // --------------------------------------------------------- height bands ----
   // Five flat colours keyed to the world height of the displaced surface. The
@@ -382,7 +485,7 @@ void main() {
   // still while the water moves under it, and it fades out at range where the
   // band edges are sub-pixel anyway.
   float h = vWorldPos.y / (WB_MAX_WAVE_HEIGHT * uBandFraction);
-  h += (noise.r - 0.5) * uBandJitter * vDetail * near01;
+  h += (noise.r - 0.5) * uBandJitter * vDetail * near01 * bandRes;
   float h01 = clamp(h * 0.5 + 0.5, 0.0, 1.0);
 
   // Collapse the ramp with distance, in two overlapping stages: the outer pair of
@@ -391,8 +494,18 @@ void main() {
   // and both ride the shared far01 ramp, the far sea loses its steps gradually
   // and arrives at the horizon as a single flat colour - which is the only way a
   // band threshold can survive a hundred wave periods landing inside one pixel.
-  float m1 = smoothstep(0.05, 0.60, far01);
-  float m2 = smoothstep(0.40, 1.00, far01);
+  //
+  // Distance is only a proxy for the thing that actually matters, though, which
+  // is how much of the height range this one pixel spans. A steep camera looking
+  // down a wave face resolves the bands perfectly at 400 m; the same 400 m seen
+  // edge-on puts a whole swell inside two pixel rows. So the collapse also
+  // listens directly to h01's own screen gradient and folds the ramp wherever
+  // that says a band has gone sub-pixel, whatever the distance. The bar is set
+  // high on purpose - a quarter of the full height range inside one pixel - so
+  // it fires only on genuine aliasing and leaves the legible far bands alone.
+  float hFlat = smoothstep(0.24, 0.72, fwidth(h01));
+  float m1 = max(smoothstep(0.05, 0.60, far01), hFlat);
+  float m2 = max(smoothstep(0.40, 1.00, far01), smoothstep(0.45, 1.00, hFlat));
   vec3 bAbyss   = mix(mix(uBandAbyss,   uBandDeep, m1), uBandMid, m2);
   vec3 bDeep    = mix(uBandDeep,    uBandMid, m2);
   vec3 bMid     = uBandMid;
@@ -400,10 +513,10 @@ void main() {
   vec3 bCrest   = mix(mix(uBandCrest, uBandShallow, m1), uBandMid, m2);
 
   vec3 albedo = bAbyss;
-  albedo = mix(albedo, bDeep,    wbStep(uBandEdge0,   h01, 0.0004, 0.5));
-  albedo = mix(albedo, bMid,     wbStep(uBandEdges.x, h01, 0.0004, 0.5));
-  albedo = mix(albedo, bShallow, wbStep(uBandEdges.y, h01, 0.0004, 0.5));
-  albedo = mix(albedo, bCrest,   wbStep(uBandEdges.z, h01, 0.0004, 0.5));
+  albedo = mix(albedo, bDeep,    wbStep(uBandEdge0,   h01, 0.0004, 0.9));
+  albedo = mix(albedo, bMid,     wbStep(uBandEdges.x, h01, 0.0004, 0.9));
+  albedo = mix(albedo, bShallow, wbStep(uBandEdges.y, h01, 0.0004, 0.9));
+  albedo = mix(albedo, bCrest,   wbStep(uBandEdges.z, h01, 0.0004, 0.9));
 
   // ------------------------------------------------------------- lighting ----
   // Same ramp path every other surface in the game uses, with the water's harder
@@ -416,8 +529,8 @@ void main() {
   // smooth fresnel is the single fastest way to make stylised water look like a
   // render. The far step is what carries the sea into the horizon haze.
   float fres = pow(1.0 - clamp(ndv, 0.0, 1.0), uFresnelPower);
-  col = mix(col, uSkyNear, wbStep(uFresnelEdges.x, fres, 0.0004, 0.4) * uFresnelStrength.x);
-  col = mix(col, uSkyFar,  wbStep(uFresnelEdges.y, fres, 0.0004, 0.4) * uFresnelStrength.y);
+  col = mix(col, uSkyNear, wbStep(uFresnelEdges.x, fres, 0.0004, 0.9) * uFresnelStrength.x);
+  col = mix(col, uSkyFar,  wbStep(uFresnelEdges.y, fres, 0.0004, 0.9) * uFresnelStrength.y);
 
   // ------------------------------------------------------------ deep water ---
   // The floor of a trough, turned up at the sun, carries a subsurface tint: the
@@ -467,10 +580,10 @@ void main() {
   // of jumping straight to 100% white. It also seeds mark density across the
   // whole near-to-mid field, which is what the empty blue quadrants were short of.
   float strokeField = crest * uStrokeGain + foamTex * 0.9 - uStrokeCut;
-  float stw = clamp(fwidth(strokeField) * 0.6, 0.004, 0.35);
-  float strokeFat = smoothstep(0.03, 0.22, stw) * uFoamWidthClamp;
-  float strokeMask = smoothstep(-stw, stw, strokeField + strokeFat);
-  col = mix(col, uStrokeColor, strokeMask * uStrokeStrength * (1.0 - 0.85 * far01));
+  vec2 stwv = wbMarkWidth(strokeField, uFoamWidthClamp);
+  float strokeMask = smoothstep(-stwv.x, stwv.x, strokeField + stwv.y);
+  col = mix(col, uStrokeColor,
+            strokeMask * uStrokeStrength * (1.0 - 0.85 * far01) * mix(0.35, 1.0, foamRes));
 
   // The far-field bar goes *up*, not down. The previous build lowered it past the
   // chop fade on the theory that the mipped tile needed help; what it actually did
@@ -479,17 +592,20 @@ void main() {
   // fall with distance - the surviving marks then get *wider*, not thinner, via
   // the clamp below.
   float cut = mix(uFoamCut.x, uFoamCut.y, far01)
-            + (noise.b - 0.5) * uFoamCutJitter * near01;
+            + (noise.b - 0.5) * uFoamCutJitter * near01 * bandRes;
   // A third, small tile carves holes through the interior, so a whitecap is a
-  // drawn cluster of marks rather than a solid untextured slab.
-  float shaped = crest * uFoamGain + foamTex - foamC * uFoamCarve * near01 - cut;
-  float sw = clamp(fwidth(shaped) * 0.6, 0.004, 0.35);
-  // Minimum drawn width. fwidth is large exactly when the mark has shrunk under a
-  // few pixels, so biasing the threshold down there keeps the survivor fat: the
-  // far water resolves into fewer, larger, still-readable marks instead of a
-  // crawling field of 1px dashes. Same principle as an outline width clamp.
-  float fat = smoothstep(0.03, 0.22, sw) * uFoamWidthClamp;
-  float shapedW = shaped + fat;
+  // drawn cluster of marks rather than a solid untextured slab. The carve tile is
+  // the finest thing in the shader (3.7 m) so it is the first to go sub-pixel;
+  // holding it to its own resolve keeps it from becoming the noise it exists to
+  // break up.
+  float carveRes = wbResolve(uvC, 0.11);
+  float shaped = crest * uFoamGain + foamTex
+               - foamC * uFoamCarve * near01 * carveRes - cut;
+  // Minimum drawn width, withdrawn again once the mark is past saving - see
+  // wbMarkWidth. x = half width of the step, y = the bias that keeps it fat.
+  vec2 swv = wbMarkWidth(shaped, uFoamWidthClamp);
+  float sw = swv.x;
+  float shapedW = shaped + swv.y;
   float foamMask = smoothstep(-sw, sw, shapedW);
 
   // Ink contour, drawn just outside the silhouette and under the fill, so the
@@ -522,8 +638,13 @@ void main() {
   // through it at reduced contrast - that is what carries the swell's contour
   // across a whitecap instead of letting it flatten into a blank plate.
   foamCol *= mix(0.86, 1.06, smoothstep(-0.02, 0.16, ndl));
-  foamCol *= mix(0.90, 1.04, wbStep(uBandEdges.z, h01, 0.0004, 0.5));
-  col = mix(col, foamCol, foamMask * uFoamStrength);
+  foamCol *= mix(0.90, 1.04, wbStep(uBandEdges.z, h01, 0.0004, 0.9));
+  // Contrast, not coverage, is what has to fall once the blobs are under a pixel:
+  // the surviving marks stay where they are and simply sink toward the water they
+  // sit on, so the far field loses its whitecaps as a wash rather than as
+  // confetti. Not zero at the limit - a trace of foam is what keeps the far swell
+  // from reading as flat paper.
+  col = mix(col, foamCol, foamMask * uFoamStrength * mix(0.28, 1.0, foamRes));
 
   // ------------------------------------------------------------ hull rings ---
   // Up to eight boats disturbing the water. Trivial cost: a distance per slot and
@@ -565,7 +686,14 @@ void main() {
   // is a render, a hard one is a drawing.
   vec2 spUv = p * uSparkleScale;
   float sp = texture(uSparkleTex, spUv).r;
-  vec3 spNoise = texture(uNoiseTex, p * uSparkleFacetScale).rgb;
+  vec2 spFacetUv = p * uSparkleFacetScale;
+  vec3 spNoise = texture(uNoiseTex, spFacetUv).rgb;
+  // A star is only a star while it is several pixels across. Past that the tile
+  // has already been mipped to its mean and thresholding it returns a scatter of
+  // fragments - the crawling specular noise the drawn-sparkle approach exists to
+  // replace. Both inputs have to hold up: the star tile for the shape, and the
+  // facet jitter that decides whether the star lights at all.
+  float spRes = min(wbResolve(spUv, 0.035), wbResolve(spFacetUv, 0.25));
   float blink = 0.5 + 0.5 * sin(uTime * uSparkleRate + spNoise.b * 41.0);
 
   vec3 Nd = normalize(N + vec3(spNoise.r - 0.5, 0.0, spNoise.g - 0.5) * uSparkleRough);
@@ -589,10 +717,9 @@ void main() {
   // threshold clips into the mip's soft shoulder, and what reaches the screen is
   // a 1px scatter of star *fragments* - which is the crawling specular noise the
   // whole graphic-sparkle approach exists to avoid.
-  float spw = clamp(fwidth(sparkVal) * 0.6, 0.002, 0.4);
-  float spFat = smoothstep(0.02, 0.20, spw) * uSparkleWidthClamp;
-  float spOn = smoothstep(-spw, spw, sparkVal - uSparkleCut + spFat);
-  col = mix(col, uSparkleColor, spOn * uSparkleStrength);
+  vec2 spwv = wbMarkWidth(sparkVal, uSparkleWidthClamp);
+  float spOn = smoothstep(-spwv.x, spwv.x, sparkVal - uSparkleCut + spwv.y);
+  col = mix(col, uSparkleColor, spOn * uSparkleStrength * spRes);
 
   // ------------------------------------------------------------------- haze ---
   // Aerial perspective, painted in layers rather than dissolved. The water steps
@@ -606,18 +733,30 @@ void main() {
   // edges wobbles the haze edges too. That is the difference between a painted
   // horizon and a target pattern.
   //
-  // The final tone is deliberately held a little under the sky's, so the horizon
-  // is always readable as a line even where a pale foam band runs up against it.
+  // Four layers rather than two, and they run to the scene's own fog far plane
+  // rather than stopping short of it. Ending the ladder early was what produced
+  // the hard waterline: the last few hundred metres of sea were all past the
+  // final edge, so they were one flat slab of a single colour butting straight
+  // into the sky, with the course furniture inside it still at near-field
+  // contrast because *that* fades on THREE.Fog's range. Sharing the far plane
+  // makes the sea and the things floating on it arrive at the horizon together,
+  // and four steps means the last stretch is still visibly stepping when it gets
+  // there - a dissolve made of bands, not a gradient and not a cut.
+  //
+  // The final tone is still held slightly under the sky's, so the horizon reads
+  // as a line rather than vanishing - but by a hair now, not by the eighth of a
+  // stop that was drawing the line in the first place.
   float fogT = clamp((vViewDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1e-3), 0.0, 1.0);
   float fog = pow(fogT, uFogCurve);
-  float fq = fog + (noise.g - 0.5) * uHazeJitter * (1.0 - fog);
-  col = mix(col, uHazeA,    wbStep(uHazeEdges.x, fq, 0.0015, 0.35));
-  col = mix(col, uHazeB,    wbStep(uHazeEdges.y, fq, 0.0015, 0.35));
-  col = mix(col, uFogColor, wbStep(uHazeEdges.z, fq, 0.0015, 0.35));
+  float fq = fog + (hazeN - 0.5) * uHazeJitter * hazeRes * (1.0 - fog * 0.4);
+  col = mix(col, uHazeA,    wbStep(uHazeEdges.x, fq, 0.0015, 0.9));
+  col = mix(col, uHazeB,    wbStep(uHazeEdges.y, fq, 0.0015, 0.9));
+  col = mix(col, uHazeC,    wbStep(uHazeEdges.z, fq, 0.0015, 0.9));
+  col = mix(col, uFogColor, wbStep(uHazeEdges.w, fq, 0.0015, 0.9));
   // Anti-aliases the disc's own silhouette against the sky: by the time the sea
   // reaches its outer rings it is already within a hair of the horizon colour, so
   // the stair-stepped edge has nothing left to contrast against.
-  col = mix(col, uFogColor, smoothstep(0.88, 1.0, fog));
+  col = mix(col, uFogColor, smoothstep(0.94, 1.0, fog));
 
   // --------------------------------------------------------------- g-buffer --
   // Low but non-zero: the Sobel pass must not scribble a line over every wave,

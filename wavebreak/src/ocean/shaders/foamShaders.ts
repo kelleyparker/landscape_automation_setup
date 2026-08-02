@@ -206,14 +206,21 @@ const float HOLE_DEPTH = 1.30;
 // How far to probe for the shaded side, in metres, on a sun-facing and on a
 // down-sun facet of the swell. This is the width of the down-sun band, so it is
 // specified in world space and honestly shrinks with distance rather than being
-// locked to a screen width. It has to stay small against FOAM_BLOB_M or the
-// "rim" swallows the shape and the ribbon reads as pale blue rather than white.
-// The wider value is the whole of the swell shading: instead of tinting the
-// body - a third tone, and the thing that turned this into a milk spill - a
-// ribbon segment lying on the back face of a swell simply draws a fatter cool
-// rim. Two tones, one hard step, and the wake still visibly bands over a crest.
-const float SHADE_M = 0.085;
-const float SHADE_DARK_M = 0.30;
+// locked to a screen width.
+//
+// This is one of the two numbers that decide whether the foam has form or is
+// torn paper. At 0.085 m against a 0.8-1.5 m island the shade tone was a rim
+// about a twentieth of the shape wide - at chase-camera distance a handful of
+// pixels down one side of a mass filling a quarter of the frame, which is to say
+// invisible, and the wake correctly read as a single flat value. At 0.30 m the
+// probe lands outside the blob across roughly a third of a typical island, so
+// every silhouette gets a lit side and a shadow side with one hard boundary
+// between them - a drawn shadow shape, not a shading term.
+//
+// A rim is a fixed width in metres, though, and the near wake is one merged mass
+// many metres across on which even 0.30 m is a sliver. The large-scale form
+// comes from the swell instead - see waveLit in main().
+const float SHADE_M = 0.30;
 
 // -- thresholds ---------------------------------------------------------------
 // A fresh wake keeps a bit over half the field, an exhausted one keeps nothing:
@@ -232,7 +239,12 @@ const float EDGE_BITE = 0.38;
 // fragment's worth of the field, so scaling the inner cut by it locks the line
 // to a fixed screen width - the same couple of pixels under the bow and two
 // hundred metres astern.
-const float INK_PX = 1.5;
+//
+// 1.5 was a single retina fragment: on the delivered 2560-wide frame it was
+// there in the file and gone on screen, so the foam met the water with no line
+// at all and sat on the surface like a cut-out. 2.6 is a line you can see at
+// presentation size without being wide enough to swallow a small island whole.
+const float INK_PX = 2.6;
 
 /**
  * The foam field: primary blob layer, a rotated lace octave that scallops the
@@ -332,17 +344,36 @@ void main() {
   float mInner = wbCrisp(base,  thresh + aa * INK_PX, aa);
 
   // The ocean's own lit/unlit split, taken from the wave normal at this spine
-  // point, so the ribbon steps exactly where the water under it does.
-  float waveLit = step(0.10, dot(normalize(vWaveN), uSunDir));
+  // point, so the ribbon steps exactly where the water under it does. The normal
+  // is re-solved on the CPU every frame in the same sampleSurface() call that
+  // seats the vertex, so this boundary rides the swell live.
+  //
+  // The reference is the value a FLAT surface returns - uSunDir.y - and not
+  // zero. That was the bug that removed the swell shading entirely: with the sun
+  // 43 degrees up, still water already returns 0.68 and the steepest face this
+  // sea state can build still returns about 0.22, so step(0.10, ...) evaluated
+  // to 1 for every fragment of every wake in the game and SHADE_DARK_M never
+  // once applied. Referenced to the flat value and biased a little under it, the
+  // terminator falls a couple of degrees below dead flat: sun-facing faces stay
+  // lit, the back of every swell flips to the shade tone, and the ribbon bands
+  // light/dark along its length as it climbs each crest. The sea state's RMS
+  // slope is about ten degrees, so this splits the wake roughly 60/40 - a real
+  // light side and a real dark side, not an occasional shaded sliver.
+  //
+  // This is the LARGE-scale form, and it is the half a fixed-width rim cannot
+  // supply: the near wake is one merged mass many metres across, so a 0.30 m rim
+  // is a sliver on it, whereas a whole segment lying on the back of a swell
+  // draws in the shade tone with a hard line across the ribbon where the water
+  // turns away. Because the normal is re-solved per spine point per frame, that
+  // banding travels along the trail as the swell moves under it.
+  float waveLit = step(uSunDir.y * 0.96, dot(normalize(vWaveN), uSunDir));
 
-  // The down-sun side. Probing the field a fixed number of metres *away* from
-  // the sun lands outside the blob only on its down-sun rim, so the step is a
-  // drawn shadow edge with a hard boundary rather than a dot product smeared
-  // over the shape. The probe distance is the only thing the swell shading
-  // touches - see SHADE_DARK_M.
+  // The SMALL-scale form: the down-sun side of each drawn silhouette. Probing
+  // the field a fixed number of metres *away* from the sun lands outside the
+  // blob only on its down-sun rim, so the step is a drawn shadow edge with a
+  // hard boundary rather than a dot product smeared over the shape.
   vec2 sunXZ = normalize(uSunDir.xz + vec2(1e-5, 1e-5));
-  float shadeM = mix(SHADE_DARK_M, SHADE_M, waveLit);
-  float away = wbFoamField(q - sunXZ * shadeM, sc, lace, teeth);
+  float away = wbFoamField(q - sunXZ * SHADE_M, sc, lace, teeth);
   float mLit = wbCrisp(away, thresh, aa);
 
   // Opacity holds at one for the first 86% of the ribbon's life and is gone by
@@ -353,11 +384,17 @@ void main() {
   float alpha = mOuter * uOpacity * (1.0 - smoothstep(0.86, 1.0, vAge));
   if (alpha < 0.004) discard;
 
-  // Two tones and a drawn contour. Nothing else: the body is PALETTE.foam flat
-  // out, PALETTE.foamShade appears only as the down-sun rim, and there is no
-  // gradient anywhere between them.
+  // Two tones and a drawn contour. Nothing else: PALETTE.foam is the lit side,
+  // PALETTE.foamShade is the down-sun side, the boundary between them is one
+  // hard step, and there is no gradient anywhere. What gives the mass its volume
+  // is that the shadow is a *shape* - the silhouette offset down-sun - rather
+  // than a shading term, so it has its own drawn edge running through the foam.
+  // Both terms are multiplied, so the two mechanisms give three readings out of
+  // two tones: foam on the lit part of a shape lying on a sun-facing swell,
+  // shade on that shape's down-sun rim, and shade across the whole of any
+  // segment lying on the swell's back face.
   vec3 col = uFoamColor;
-  col = mix(uFoamShade, col, mLit);   // down-sun shadow step
+  col = mix(uFoamShade, col, mLit * waveLit);
   col = mix(uFoamEdge, col, mInner);  // contour on the silhouette and hole rims
 
   gColor = vec4(col, alpha);
