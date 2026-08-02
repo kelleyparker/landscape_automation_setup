@@ -39,6 +39,7 @@ function parseArgs(argv) {
     seed: 1337,
     quiet: false,
     settle: 0,
+    noDrive: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -52,6 +53,7 @@ function parseArgs(argv) {
     else if (a === '--port') out.port = Number(next());
     else if (a === '--seed') out.seed = Number(next());
     else if (a === '--settle') out.settle = Number(next());
+    else if (a === '--no-drive') out.noDrive = true;
     else if (a === '--keep') out.keep = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--list') out.list = true;
@@ -184,6 +186,9 @@ async function main() {
     // Deterministic mode: the game exposes a fixed-step advance so a given
     // (seed, time) always produces the identical frame.
     const shots = ARGS.shots ?? (info.game.shots.length ? info.game.shots : ['chase']);
+    // Frames of a parked boat prove nothing about wake, spray, drift or landings,
+    // so the harness races the player unless explicitly told not to.
+    if (!ARGS.noDrive) await page.evaluate(() => window.__wavebreak.autopilot(true));
     log(`> advancing sim to t=${ARGS.time}s`);
     await page.evaluate((t) => window.__wavebreak.advanceTo(t), ARGS.time);
 
