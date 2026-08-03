@@ -149,6 +149,10 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 /**
  * Expands a personality into driving constants.
  *
@@ -207,12 +211,28 @@ export function deriveTuning(p: Personality): DriverTuning {
 
     // Hoarding is a precision trait; dumping is an aggression trait. A driver
     // high in both lands mid-table, which is the correct answer.
-    boostAt: Math.max(0.08, 0.16 + 0.52 * pr - 0.24 * a),
+    //
+    // CEILING MATTERS AS MUCH AS THE SLOPE, and it was measured the hard way.
+    // The previous coefficients gave Nori (pr 0.95, a 0.38) a threshold of
+    // 0.563 - but a clean driver also earns the least charge, and instrumenting
+    // 30s of racing showed Nori's meter never exceeds 0.48. Precision was both
+    // lowering the income and raising the price, so the two compounded and Nori
+    // boosted 0% of the time across a whole session while Vex managed 7.4% and
+    // Gus 5.9%. A "saves it for the straight" driver that can never afford to
+    // spend is just a driver with a dead mechanic.
+    //
+    // The clamp is the actual fix: no personality may want more meter than the
+    // hull can realistically bank. 0.45 sits comfortably under the measured
+    // 0.48 worst case with room for a bad lap.
+    boostAt: clamp(0.14 + 0.30 * pr - 0.18 * a, 0.08, 0.45),
     boostJitter: 0.42 * sloppy,
-    // Nori (0.64) will not spend below a ~130 m radius, i.e. on a straight.
-    // Vex and Gus both land on 0 - aggression cancels the requirement outright,
-    // so they burn it the instant the meter clears their threshold, corner or not.
-    boostStraightness: Math.max(0, 0.85 * pr - 0.45 * a),
+    // Same trap, smaller: Nori needed a 0.637 straightness before it would
+    // spend, which together with the meter gate meant the two conditions were
+    // never true at once. At 0.60 * pr it lands near 0.40 - still "waits for
+    // something resembling a straight", but a straight this course actually has.
+    // Vex and Gus stay at 0: aggression cancels the requirement outright, so
+    // they burn it the instant the meter clears, corner or not.
+    boostStraightness: Math.max(0, 0.60 * pr - 0.45 * a),
 
     // Aggression buys the willingness to sit in someone's wake and lean on them.
     avoidGain: lerp(1.20, 0.42, a),

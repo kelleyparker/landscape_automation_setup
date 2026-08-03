@@ -222,9 +222,30 @@ export class Game {
     });
   }
 
-  /** Cheap sphere-ish separation between hulls; keeps races scrappy, not sticky. */
+  /**
+   * Cheap sphere-ish separation between hulls; keeps races scrappy, not sticky.
+   *
+   * Separation is applied every frame while hulls overlap - that is just
+   * physics. The COLLISION EVENT is not, and that distinction was a real bug:
+   * this used to call registerHit() on every overlapping frame, so two boats
+   * running side by side generated a fresh impact 60 times a second. The audio
+   * probe measured 198 "hits" in an 18-second race, each one spawning camera
+   * shake and an audio one-shot. Continuous contact is a scrape, not a crash.
+   *
+   * An event now needs two things:
+   *  - the hulls must be CLOSING along the contact normal, not merely touching.
+   *    Boats drafting or sliding apart have no approach velocity and produce
+   *    nothing, which is what stops the spam at its source.
+   *  - a per-pair cooldown, so one collision is one event no matter how many
+   *    frames the hulls stay tangled afterwards.
+   */
   private resolveBoatCollisions(): void {
     const R = 1.75;
+    /** m/s of approach below which contact is a scrape, not an impact. */
+    const IMPACT_SPEED = 2.2;
+    /** Seconds before the same pair may register a second impact. */
+    const PAIR_COOLDOWN = 0.28;
+
     for (let i = 0; i < this.boats.length; i++) {
       for (let j = i + 1; j < this.boats.length; j++) {
         const a = this.boats[i]!;
@@ -240,13 +261,26 @@ export class Game {
         const push = (min - d) * 0.5;
         a.applySeparation(-nx * push, -nz * push);
         b.applySeparation(nx * push, nz * push);
-        const rel = Math.abs(a.state.speed - b.state.speed) + Math.abs(a.state.slip) + Math.abs(b.state.slip);
-        const mag = Math.min(1, rel * 0.06 + push * 0.5);
+
+        // Approach speed along the contact normal. Positive = closing.
+        const closing =
+          (a.state.velocity.x - b.state.velocity.x) * nx +
+          (a.state.velocity.z - b.state.velocity.z) * nz;
+        if (closing < IMPACT_SPEED) continue;
+
+        const pair = i * 4 + j;
+        if (this.engine.elapsed - (this.lastHitAt[pair] ?? -99) < PAIR_COOLDOWN) continue;
+        this.lastHitAt[pair] = this.engine.elapsed;
+
+        const mag = Math.min(1, closing / 14);
         a.registerHit(mag);
         b.registerHit(mag);
       }
     }
   }
+
+  /** Last impact time per boat pair, indexed i*4+j. Module of the cooldown above. */
+  private readonly lastHitAt: number[] = [];
 
   /**
    * Hands the player's boat to an AI driver. Used by the screenshot harness so
