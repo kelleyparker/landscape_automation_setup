@@ -99,8 +99,12 @@ export class CameraRig {
   constructor(readonly camera: THREE.PerspectiveCamera) {}
 
   /** Add a one-shot shake impulse, 0..1. */
+  /** 0..1 multipliers driven by player settings. Motion sensitivity is real. */
+  shakeScale = 1;
+  fovKickScale = 1;
+
   addShake(amount: number): void {
-    this.shake = Math.min(1.4, this.shake + amount);
+    this.shake = Math.min(1.4, this.shake + amount * this.shakeScale);
   }
 
   /** Names the harness may pass to `applyShot`. */
@@ -216,7 +220,7 @@ export class CameraRig {
 
     this.camera.position.copy(this.pos);
 
-    const fovTarget = this.baseFov + speed01 * 9 + (st.boosting ? 7 : 0) + st.airTime * 3;
+    const fovTarget = this.baseFov + (speed01 * 9 + (st.boosting ? 7 : 0) + st.airTime * 3) * this.fovKickScale;
     this.fov += (Math.min(this.maxFov, fovTarget) - this.fov) * Math.min(1, 4.0 * dt);
     this.applyFov();
 

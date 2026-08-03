@@ -17,6 +17,8 @@ import { Boat } from './boat/Boat';
 import { Rider } from './rider/Rider';
 import { Composer } from './render/Composer';
 import { Hud } from './ui/Hud';
+import { PauseMenu } from './ui/PauseMenu';
+import { Settings } from './core/Settings';
 import { Audio } from './audio/Audio';
 
 /**
@@ -39,6 +41,8 @@ export class Game {
   readonly composer: Composer;
   readonly hud: Hud;
   readonly audio: Audio;
+  readonly settings = new Settings();
+  readonly pauseMenu: PauseMenu;
 
   player: Boat;
 
@@ -48,6 +52,8 @@ export class Game {
    * capsule reads as a screenshot someone forgot to clean up.
    */
   hudEnabled = true;
+  /** True while the pause menu owns input; the world renders but does not tick. */
+  paused = false;
   private readonly hudCanvas: HTMLCanvasElement;
 
   constructor(container: HTMLElement, hudCanvas: HTMLCanvasElement) {
@@ -97,6 +103,13 @@ export class Game {
     this.hudCanvas = hudCanvas;
     this.audio = new Audio();
 
+    this.pauseMenu = new PauseMenu(
+      this.settings,
+      () => { this.paused = false; },
+      () => { this.paused = false; this.restart(); }
+    );
+
+    this.applySettings();
     this.wire();
     this.cameraRig.snap(this.player, 0);
   }
@@ -105,6 +118,7 @@ export class Game {
     const e = this.engine;
 
     e.onUpdate((dt, t) => {
+      if (this.paused) return;
       const status = this.director.status;
 
       // --- input -----------------------------------------------------------
@@ -137,22 +151,75 @@ export class Game {
     });
 
     e.onLateUpdate((dt, t) => {
+      if (this.paused) {
+        // Still draw: the menu sits over a live frame of the world, which keeps
+        // the player oriented and costs nothing extra.
+        this.drawOverlay(dt);
+        return;
+      }
       this.cameraRig.update(dt, t, this.player, this.director.status);
       const st = this.player.state;
       if (st.landingImpact > 0.05) this.cameraRig.addShake(st.landingImpact * 0.55);
       if (st.hitImpact > 0.05) this.cameraRig.addShake(st.hitImpact * 0.4);
       this.ocean.follow(this.engine.camera);
-      if (this.hudEnabled) {
-        this.hud.render(this.boats, this.player, this.director.status, this.engine, this.course);
-      } else {
-        const ctx = this.hudCanvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
-      }
+      this.drawOverlay(dt);
     });
 
     e.setRenderFn(() => this.composer.render());
 
     this.input.onRestart(() => this.restart());
+
+    // Escape toggles pause; the menu consumes navigation keys while open so the
+    // boat never reads them.
+    this.input.onKeyPress((code) => {
+      if (this.pauseMenu.handleKey(code)) return true;
+      if (code === 'Escape') { this.paused = true; this.pauseMenu.show(); return true; }
+      return false;
+    });
+
+    // A racing game left running in a background tab or an alt-tabbed desktop
+    // window is a real problem; rAF throttling only half-solves it.
+    window.addEventListener('blur', () => {
+      if (!this.paused && this.director.status.phase === 'racing') {
+        this.paused = true;
+        this.pauseMenu.show();
+      }
+    });
+  }
+
+  /** HUD + pause menu, drawn on the shared 2D overlay in that order. */
+  private drawOverlay(dt: number): void {
+    const ctx = this.hudCanvas.getContext('2d');
+    if (this.hudEnabled) {
+      this.hud.render(this.boats, this.player, this.director.status, this.engine, this.course);
+    } else if (ctx) {
+      ctx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    }
+    if (ctx && (this.pauseMenu.visible || this.paused)) {
+      const dpr = this.hudCanvas.width / Math.max(1, window.innerWidth);
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.pauseMenu.render(ctx, window.innerWidth, window.innerHeight, dt);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Push every setting at the thing it controls. Called once at construction
+   * and on every change, so no setting can be silently inert.
+   */
+  private applySettings(): void {
+    this.settings.onChange((s) => {
+      this.engine.setMaxPixelRatio(s.resolutionScale);
+      this.composer.setEnabled(s.edges, s.bloom);
+      this.cameraRig.shakeScale = s.cameraShake;
+      this.cameraRig.fovKickScale = s.fovKick;
+      // Volume lands through whichever API the audio system exposes; mute is
+      // the one guaranteed to exist.
+      const audio = this.audio as unknown as { setMasterVolume?: (v: number) => void };
+      audio.setMasterVolume?.(s.muted ? 0 : s.masterVolume);
+      this.audio.setMuted(s.muted || s.masterVolume <= 0);
+    });
   }
 
   /** Cheap sphere-ish separation between hulls; keeps races scrappy, not sticky. */

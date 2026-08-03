@@ -17,6 +17,13 @@ export class Input {
   scripted: BoatInput | null = null;
 
   private restartHandlers: (() => void)[] = [];
+  /**
+   * Discrete key-press subscribers. The BoatInput path is continuous and
+   * smoothed, which is right for driving and useless for a menu - a menu needs
+   * one event per physical press. A subscriber returning true consumes the key,
+   * so the pause menu can swallow WASD without the boat also reading it.
+   */
+  private keyHandlers: ((code: string) => boolean)[] = [];
 
   constructor() {
     window.addEventListener('keydown', this.onKeyDown);
@@ -26,7 +33,15 @@ export class Input {
 
   onRestart(fn: () => void): void { this.restartHandlers.push(fn); }
 
+  onKeyPress(fn: (code: string) => boolean): void { this.keyHandlers.push(fn); }
+
   private onKeyDown = (e: KeyboardEvent): void => {
+    // Auto-repeat must not drive a menu; one press, one event.
+    if (!e.repeat) {
+      for (const h of this.keyHandlers) {
+        if (h(e.code)) { e.preventDefault(); return; }
+      }
+    }
     this.keys.add(e.code);
     if (e.code === 'KeyR') for (const h of this.restartHandlers) h();
     // Stop the page scrolling under the game.

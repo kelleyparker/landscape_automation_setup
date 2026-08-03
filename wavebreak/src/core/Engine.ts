@@ -47,7 +47,7 @@ export class Engine {
   /** Current resolution scale applied on top of devicePixelRatio. */
   resolutionScale = 1;
 
-  private readonly maxPixelRatio: number;
+  private maxPixelRatio: number;
   private readonly frameBudgetMs: number;
   private running = false;
   private rafId = 0;
@@ -109,6 +109,17 @@ export class Engine {
     const base = Math.min(window.devicePixelRatio, this.maxPixelRatio);
     this.renderer.setPixelRatio(base * this.resolutionScale);
     this.renderer.setSize(window.innerWidth, window.innerHeight, true);
+  }
+
+  /**
+   * Player-facing resolution cap. The adaptive scaler still runs underneath, so
+   * this sets the ceiling rather than fighting it.
+   */
+  setMaxPixelRatio(v: number): void {
+    const next = Math.max(0.5, Math.min(4, v));
+    if (Math.abs(next - this.maxPixelRatio) < 1e-3) return;
+    this.maxPixelRatio = next;
+    this.applySize();
   }
 
   /** Effective drawing-buffer size, for post-process render targets. */

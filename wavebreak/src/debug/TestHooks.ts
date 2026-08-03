@@ -46,6 +46,7 @@ export interface WavebreakHooks {
   phase(name: string): void;
   autopilot(on: boolean): void;
   setHud(on: boolean): void;
+  pause(on: boolean, page?: string): void;
   freezeCamera(on: boolean): void;
   redraw(n: number): void;
   stats(): Record<string, number | string>;
@@ -97,6 +98,19 @@ export function installTestHooks(game: Game): void {
     autopilot(on: boolean): void { game.setAutopilot(on); },
 
     setHud(on: boolean): void { game.hudEnabled = on; },
+
+    /** Open or close the pause menu, and optionally jump to a page. */
+    pause(on: boolean, page?: string): void {
+      game.paused = on;
+      if (on) {
+        game.pauseMenu.show();
+        if (page === 'settings') {
+          game.pauseMenu.handleKey('ArrowDown');
+          game.pauseMenu.handleKey('ArrowDown');
+          game.pauseMenu.handleKey('Enter');
+        }
+      } else game.pauseMenu.hide();
+    },
 
     /**
      * Pin the camera exactly where it is. The named shots all re-derive from

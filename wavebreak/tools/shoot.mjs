@@ -42,6 +42,7 @@ function parseArgs(argv) {
     noDrive: false,
     noHud: false,
     phase: null,
+    pause: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -58,6 +59,7 @@ function parseArgs(argv) {
     else if (a === '--no-drive') out.noDrive = true;
     else if (a === '--no-hud') out.noHud = true;
     else if (a === '--phase') out.phase = next();
+    else if (a === '--pause') out.pause = next();
     else if (a === '--keep') out.keep = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--list') out.list = true;
@@ -206,6 +208,11 @@ async function main() {
     if (ARGS.phase) {
       await page.evaluate((p) => window.__wavebreak.phase(p), ARGS.phase);
       await page.evaluate(() => window.__wavebreak.renderFrames(10));
+    }
+
+    if (ARGS.pause) {
+      await page.evaluate((pg) => window.__wavebreak.pause(true, pg), ARGS.pause);
+      await page.evaluate(() => window.__wavebreak.renderFrames(20));
     }
 
     for (const shot of shots) {
