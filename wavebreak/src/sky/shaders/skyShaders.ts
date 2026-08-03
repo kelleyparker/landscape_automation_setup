@@ -17,11 +17,12 @@ import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE } from '../../render/shaders/celCh
  *     angle between the view ray and `uSunDir`; the flare is anchored by
  *     projecting the *same* vector to NDC with w = 0. A directional light has no
  *     parallax, so both land on the same pixel by construction - there is no way
- *     for the drawn sun and the lighting sun to disagree. Neither is ever in
- *     shot: SUN_DIR is 43 degrees up and every camera the game owns looks at or
- *     below the waterline, so the sun's actual contribution to the frame is the
- *     horizon beam (SKY_BEAM, below) and the disc is what a jump or the results
- *     orbit reveals when the camera finally tips up to it.
+ *     for the drawn sun and the lighting sun to disagree. Both ARE framed: the
+ *     horizon rig aims down the sun's own azimuth through a 72-degree frame and
+ *     puts the disc, the corona and the burst in the upper right of the shot, so
+ *     everything below is drawing that a player sees rather than decoration. The
+ *     chase and bow rigs keep it out of frame and are carried instead by the
+ *     horizon beam (SKY_BEAM, below).
  *
  *  3. **The G-buffer contract, under blending.** WebGL applies the blend
  *     equation to every colour attachment, and each attachment uses *its own*
@@ -116,15 +117,14 @@ const float SKY_HAZE[7] = float[7](0.30, 0.06, 0.000, 0.000, 0.000, 0.000, 0.000
 const float SKY_WARM[7] = float[7](0.14, 0.03, 0.000, 0.000, 0.000, 0.000, 0.000);
 
 // -- the sun's in-frame evidence ----------------------------------------------
-// SUN_DIR sits 43 degrees above the horizon. No camera this game owns ever
-// frames it: the chase and bow rigs look at the waterline through a 58-degree
-// frame and the aerial rig looks down. The disc and the flare below are drawn
-// correctly and are simply never seen, which makes them decoration rather than
-// art direction - so the sun's presence is stated down where the player is
-// actually looking, as a wedge of hot light stacked on the horizon on the sun's
-// own azimuth. It is quantised on both axes - four flats of warmth across the
-// compass, and per-band up the elevation - so it lands as painted blocks of
-// light in the same idiom as the sky it sits in, and never as a glow.
+// SUN_DIR sits 43 degrees above the horizon, so the disc is only framed when a
+// camera tips up to it - the horizon rig does, the chase, bow, pack and aerial
+// rigs do not. Those four are the ones the player spends the race inside, so the
+// sun's presence has to be stated down where they are looking, as a wedge of hot
+// light stacked on the horizon on the sun's own azimuth. It is quantised on both
+// axes - four flats of warmth across the compass, and per-band up the elevation -
+// so it lands as painted blocks of light in the same idiom as the sky it sits
+// in, and never as a glow.
 //
 // How much of each band the beam claims, indexed exactly like SKY_TONE. Keying
 // it to the band index rather than to a second elevation ramp matters twice
@@ -134,7 +134,31 @@ const float SKY_WARM[7] = float[7](0.14, 0.03, 0.000, 0.000, 0.000, 0.000, 0.000
 // lavender-grey that a continuous falloff produced, so the weights are either
 // decisive or nothing - the two pale bands are taken over almost completely, the
 // third gets a whisper, and everything above it is left as painted sky.
-const float SKY_BEAM[7] = float[7](0.95, 0.78, 0.10, 0.000, 0.000, 0.000, 0.000);
+const float SKY_BEAM[7] = float[7](1.00, 0.94, 0.06, 0.000, 0.000, 0.000, 0.000);
+// THE BEAM IS A VALUE STAIRCASE, NOT A SLAB. This is the correction that matters
+// most in this file. Blending two adjacent bands toward ONE shared hot colour
+// -- which is what a single shared hot tone did -- overwrites two steps of the ramp
+// with one flat plate: measured off the sun the stack runs 233/202/170/140/116/
+// 92, and on the sun's side it collapsed to 221/219, a step of two luma where
+// the painting wants thirty. The sky then reads as haze exactly where it is
+// supposed to read as light, which is the whole point of the beam.
+//
+// So each band gets its OWN hot tone, and the two knobs are separated:
+//   SKY_BEAM_GOLD - how far that band's tone is carried from the cool haze white
+//                   to the sun's gold, i.e. its HUE,
+//   SKY_BEAM_VAL  - what value that tone is then set at, i.e. its STEP.
+// The beam therefore changes the hue of the low bands and leaves their value
+// relationship alone: hot cream on the waterline, saturated amber above it, and
+// a whisper of warmth on the blue band over that. Measured sRGB luma comes out
+// at 234 / 202 / 172, against 233 / 202 / 170 off the beam - the same staircase,
+// relit, rather than a pale slab laid over the top of it.
+const float SKY_BEAM_GOLD[7] = float[7](0.46, 0.95, 1.00, 0.000, 0.000, 0.000, 0.000);
+// Deliberately capped at 0.985 on the waterline band. The bright pass thresholds
+// at linear luma 0.85 (Composer.BLOOM_THRESHOLD); this tone peaks at 0.827, so
+// the glare band is the brightest flat in the sky and still does NOT spill a
+// photographic halo along the entire horizon. That margin is load-bearing - a
+// beam that blooms is a beam that has stopped being drawn.
+const float SKY_BEAM_VAL[7]  = float[7](0.985, 0.855, 0.740, 1.000, 1.000, 1.000, 1.000);
 
 // -- sun geometry -------------------------------------------------------------
 // Angular radii in radians. The real sun is 0.0047 rad; every one of these is
@@ -215,7 +239,16 @@ void main() {
   // sun's gold, NOT the gold itself: gold laid straight over mid-blue makes
   // mauve, and a mauve horizon is the mud this is supposed to replace. Going
   // through white first keeps every step in the cream-to-gold family.
-  float beamAz = clamp((axis - 0.15) * 1.35, 0.0, 1.0)
+  //
+  // The wedge is DIRECTED, which means it has to be narrow enough to have a
+  // side. Opening at axis >= 0.335 put the beam across 140 degrees of compass -
+  // most of a half-turn - and a light that covers that much of the sky is not
+  // read as coming from anywhere; it is read as haze. Opening at 0.527 instead
+  // gives a 116-degree wedge, wide enough that the racing cameras still catch it
+  // and narrow enough that turning away from the sun visibly leaves it. The
+  // slope is set so the innermost compass flat is actually reached at axis = 1
+  // rather than clipped off past the end of the range.
+  float beamAz = clamp((axis - 0.38) * 1.70, 0.0, 1.0)
                + 0.05 * sin(a01 * 34.0 + uTime * 0.039);
   float azStep = floor(clamp(beamAz, 0.0, 1.0) * 4.0) * 0.25;
   // The four compass steps change how GOLD the light is, not how much of it
@@ -223,7 +256,13 @@ void main() {
   // every half-mixed blue-and-gold on the way out to the wedge's edge, and every
   // one of those is mud; stepping the hue keeps all four flats inside the
   // cream-to-gold family and puts a single hard boundary at the wedge's side.
-  vec3  hot = mix(uHazeLift, uSunGlow, 0.20 + 0.62 * azStep);
+  //
+  // The compass only ever swings the hue between 0.85 and 1.0 of the band's own
+  // gold. Letting it run down to zero would walk the waterline band back toward
+  // pure haze white, whose linear luma is 0.951 - over the bloom threshold - so
+  // the outer edge of the wedge would be the one part of it that glowed.
+  float goldMix = SKY_BEAM_GOLD[bi] * (0.85 + 0.15 * azStep);
+  vec3  hot = mix(uHazeLift, uSunGlow, goldMix) * SKY_BEAM_VAL[bi];
   col = mix(col, hot, SKY_BEAM[bi] * step(0.24, azStep));
 
   // Below the horizon the ocean covers everything - except at the very edge of
@@ -240,7 +279,14 @@ void main() {
   //
   // The two outer rings lift toward the pale haze colour rather than toward gold:
   // over mid-blue sky a gold ring of any width turns violet, which is exactly the
-  // muddy corona this replaced.
+  // muddy corona this replaced. They are not left at PURE haze either, though -
+  // a cool near-white ring around a gold disc reads as grey-blue smoke sitting in
+  // front of the sun. Carrying the haze a third of the way to the sun's own gold
+  // keeps every one of the five steps inside the cream-to-gold family, so the
+  // corona steps down in value without ever changing family.
+  vec3 coronaOuter = mix(uHazeLift, uSunGlow, 0.16);
+  vec3 coronaMid   = mix(uHazeLift, uSunGlow, 0.48);
+
   float ang = acos(clamp(dot(dir, sunDir), -1.0, 1.0));
   float w   = fwidth(ang) * 0.8 + 1e-4;
   // The halo breathes - on threes, quantised, so it animates like a drawing.
@@ -252,8 +298,8 @@ void main() {
   float ring1 = 1.0 - smoothstep(SUN_RING1  - w, SUN_RING1  + w, ang);
   float core  = 1.0 - smoothstep(SUN_CORE   - w, SUN_CORE   + w, ang);
 
-  col = mix(col, uHazeLift, halo  * 0.22);
-  col = mix(col, uHazeLift, ring3 * 0.46);
+  col = mix(col, coronaOuter, halo  * 0.22);
+  col = mix(col, coronaMid,   ring3 * 0.46);
   col = mix(col, uSunGlow,  ring2 * 0.60);
   col = mix(col, uSunGlow,  ring1 * 0.88);
   col = mix(col, uSunCore,  core);
@@ -430,23 +476,23 @@ void main() {
 // --------------------------------------------------------------- flare -------
 
 export const FLARE_VERT = /* glsl */ `
-// The flare is a screen-space ornament. 'position.xy' is the shape in flare
+// The burst is a screen-space ornament. 'position.xy' is the shape in flare
 // space, measured in screen units where 1.0 is half the frame height; z is
 // unused. Nothing about this mesh's world transform matters.
-in vec2 aLocal;   // shape-local coord for the hexagon SDF (unused by spikes)
-in vec4 aData;    // x anchor t, y alpha, z tint 0..1, w spine/edge weight
-in vec4 aMisc;    // x kind, y ring ratio, z shimmer phase, w shimmer amount
+//
+// Every piece is a ray anchored on the sun itself, so there is no anchor-along-
+// the-axis term any more: the two hexagonal ghosts that needed one have been
+// deleted (see Sky.ts). What is left is a drawn sunburst, not a lens simulation.
+in vec3 aData;    // x alpha, y tint 0..1, z spine/flank weight
+in vec2 aMisc;    // x shimmer phase, y shimmer amount
 
 uniform vec3  uSunDir;
 uniform float uTime;
 uniform float uOpacity;
 
-out vec2  vLocal;
 out float vAlpha;
 out float vTint;
 out float vEdge;
-out float vKind;
-out float vRing;
 
 void main() {
   // Project the sun. w = 0 treats it as the directional light it is, so this is
@@ -462,22 +508,22 @@ void main() {
   float aspect = projectionMatrix[1][1] / max(projectionMatrix[0][0], 1e-6);
   vec2  sunScreen = vec2(sunNdc.x * aspect, sunNdc.y);
 
-  // The ornament's axis runs sun -> frame centre and everything rotates with it,
-  // which is what makes the spikes and ghosts read as one drawn device rather
-  // than a scatter of sprites that happen to be near the sun.
+  // The burst's axis runs sun -> frame centre and every ray rotates with it, so
+  // the long pair always points into the frame. That is what makes the six read
+  // as one drawn device rather than as a pinwheel stuck on the sun.
   float axLen = length(sunScreen);
   vec2  axis  = axLen > 1e-4 ? -sunScreen / axLen : vec2(1.0, 0.0);
 
   // Shimmer, quantised to five steps. A smooth sine pulse is the signature of a
-  // photographic artefact; stepping it makes the flare look animated on 3s.
-  float s  = sin(uTime * 0.85 + aMisc.z);
-  float sc = 1.0 + aMisc.w * (floor(s * 2.0 + 0.5) * 0.5);
+  // photographic artefact; stepping it makes the burst look animated on 3s.
+  float s  = sin(uTime * 0.85 + aMisc.x);
+  float sc = 1.0 + aMisc.y * (floor(s * 2.0 + 0.5) * 0.5);
 
   vec2 p = position.xy * sc;
   vec2 rotated = vec2(p.x * axis.x - p.y * axis.y, p.x * axis.y + p.y * axis.x);
-  // anchor 0 sits on the sun, 1 on the frame centre, >1 past it. Ghosts ride
-  // this axis; spikes are anchored at 0 and so scale about the sun itself.
-  vec2 screen = sunScreen * (1.0 - aData.x) + rotated;
+  // Every ray is anchored on the sun and scales about it, so the burst stays
+  // welded to the disc the dome paints instead of drifting across the frame.
+  vec2 screen = sunScreen + rotated;
 
   // z = 0 with depth testing off: this is an overlay, drawn last, over everything.
   gl_Position = vec4(screen.x / aspect, screen.y, 0.0, 1.0);
@@ -486,18 +532,16 @@ void main() {
   // The band is deliberately generous rather than cutting at the frame border:
   // the chase camera sits about 9 degrees nose-down with a 58 degree FOV, which
   // puts SUN_DIR at roughly |ndc| = 2.3 - so a fade that ends at 1.0 would mean
-  // the flare literally never appears. Ending at 1.55 keeps the ordinary racing
-  // shot completely clean while letting the spikes reach into frame the moment
-  // the camera tips up (jumps, the orbit intro, the results circle).
+  // the burst literally never appears. Ending at 1.55 keeps the ordinary racing
+  // shot completely clean while letting the rays reach into frame the moment
+  // the camera tips up (the horizon rig, jumps, the orbit intro, the results
+  // circle). The horizon rig sits at |ndc| ~ 0.5, i.e. fully on.
   float edge = max(abs(sunNdc.x), abs(sunNdc.y));
   float fade = (1.0 - smoothstep(0.80, 1.55, edge)) * inFront;
 
-  vLocal = aLocal;
-  vAlpha = aData.y * fade * uOpacity;
-  vTint  = aData.z;
-  vEdge  = aData.w;
-  vKind  = aMisc.x;
-  vRing  = aMisc.y;
+  vAlpha = aData.x * fade * uOpacity;
+  vTint  = aData.y;
+  vEdge  = aData.z;
 }
 `;
 
@@ -510,53 +554,47 @@ ${GBUFFER_WRITE}
 uniform vec3 uCore;
 uniform vec3 uGlow;
 
-in vec2  vLocal;
 in float vAlpha;
 in float vTint;
 in float vEdge;
-in float vKind;
-in float vRing;
-
-/** Regular hexagon SDF (Inigo Quilez). Negative inside; unit apothem. */
-float wbHex(vec2 p) {
-  const vec3 k = vec3(-0.8660254, 0.5, 0.5773503);
-  p = abs(p);
-  p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
-  p -= vec2(clamp(p.x, -k.z, k.z), 1.0);
-  return length(p) * sign(p.y);
-}
 
 void main() {
-  // Spike. Hard along the spine, feathered at the two long edges. The renderer
-  // runs with MSAA off (it fights the ink lines), and a two-pixel-wide triangle
-  // with a hard edge crawls violently as the camera moves - this is the cheapest
-  // fix, and it also gives the spike the bright-cored look a drawn ray should have.
-  float spikeMask = smoothstep(0.0, 0.32, vEdge);
-
-  // Ghost. Evaluated as an SDF rather than as hexagon geometry, so the edge gets
-  // exactly one pixel of anti-aliasing at any size and the ring variant is a
-  // subtraction instead of twelve more triangles.
+  // A DRAWN RAY, NOT A LENS ARTEFACT.
   //
-  // Both branches are evaluated unconditionally on purpose: fwidth() inside
-  // non-uniform control flow is undefined in GLSL ES, and the cost here is a
-  // handful of ALU on a mesh with well under a hundred vertices. Spikes carry
-  // vLocal = (0,0) and vRing = 1, so the hexagon terms stay finite for them.
-  float d  = wbHex(vLocal);
-  float w  = fwidth(d) * 1.1 + 1e-5;
-  float di = wbHex(vLocal / max(vRing, 1e-3)) * vRing;
-  float hexMask = (1.0 - smoothstep(-w, w, d))
-                * mix(1.0, smoothstep(-w, w, di), step(1.5, vKind));
-
-  float mask = mix(spikeMask, hexMask, step(0.5, vKind));
+  // vEdge is 1 along the ray's spine and 0 at its two long flanks, so cutting it
+  // at a threshold turns the interpolant into a hard-edged wedge, and fwidth
+  // gives that cut exactly one pixel of anti-aliasing - the same treatment the
+  // dome gives its five sun discs and the cloud atlas gives its contours.
+  //
+  // What this replaces was smoothstep(0.0, 0.32, vEdge), which feathered a third
+  // of the half-width. That feather is the whole problem: it walks the ray down
+  // through every low alpha on its way out, and additive gold at low alpha over
+  // the saturated cobalt of this sky cannot resolve to gold - it lands on
+  // lavender. Measured on the reference frame the outer reaches of the spikes sat
+  // at rgb(167,153,202). A ray that is either fully there or not there never
+  // visits that colour, so the shape is cut hard and the taper is carried by the
+  // GEOMETRY narrowing to a point, which is how a burst is drawn.
+  //
+  // Two thresholds, not one: a wide flank and a narrow spine, cut from the same
+  // interpolant so they can never disagree about where the ray is. That makes
+  // each ray a two-tone drawing rather than a flat triangle.
+  float aa    = fwidth(vEdge) + 1e-5;
+  float flank = smoothstep(0.20 - aa, 0.20 + aa, vEdge);
+  float spine = smoothstep(0.76 - aa, 0.76 + aa, vEdge);
+  float mask  = flank * 0.62 + spine * 0.38;
 
   float a = mask * vAlpha;
   if (a < 0.002) discard;
 
-  gColor = vec4(mix(uCore, uGlow, vTint), a);
+  // The spine runs to the sun's core cream and the flank keeps the ray's own
+  // gold, so additively the burst is a white-hot centre line with a warm
+  // shoulder - which is the read a drawn burst has and a photographic one
+  // does not.
+  gColor = vec4(mix(uCore, uGlow, vTint * (1.0 - spine * 0.70)), a);
 
   // Additive pass. The blend equation runs on attachment 1 too, and its source
   // factor is that attachment's own alpha - which is edgeMask, which is 0 here.
-  // So this call provably adds nothing: the normal/depth buffer under the flare
+  // So this call provably adds nothing: the normal/depth buffer under the burst
   // survives untouched and the Sobel pass keeps inking whatever is behind it.
   wbWriteGBuffer(vec3(0.0, 0.0, 1.0), 0.0, 0.0);
 }

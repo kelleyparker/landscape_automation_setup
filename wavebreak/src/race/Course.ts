@@ -4,6 +4,13 @@ import type { Rng } from '../core/Rng';
 import { makeCelMaterial, CEL_PRESETS } from '../render/CelMaterial';
 import { OutlineMaterial, computeSmoothNormals, type OutlineOptions } from '../render/OutlineHull';
 import { sampleSurface, sampleHeight, type SurfaceSample } from '../ocean/GerstnerCPU';
+// The ribbon rides the same wave LOD cascade the sea is drawn with. One
+// definition, imported - see the "must match the ocean" note below.
+import {
+  MID_WAVE_COUNT, FAR_WAVE_COUNT,
+  CHOP_FADE_START, CHOP_FADE_END,
+  SWELL_FADE_START, SWELL_FADE_END,
+} from '../ocean/Ocean';
 import {
   buildRaceLineShaders,
   GATE_BANNER_VERT, GATE_BANNER_FRAG,
@@ -241,16 +248,21 @@ const PROJECTION_POOL = 24;
 
 // --- must match the ocean ----------------------------------------------------
 /**
- * These three mirror private tuning in `ocean/Ocean.ts` and `core/Engine.ts`.
- * They are duplicated rather than imported because those modules do not export
- * them; if either changes, this must follow. The failure mode is visible and
- * specific: get the chop fade wrong and the racing line saws through the sea
- * somewhere past 100 m; get the far plane wrong and the Sobel pass mis-reads
- * every course surface's depth.
+ * The ribbon's wave LOD is now *imported* from `ocean/Ocean.ts` rather than
+ * restated here - see the import list at the top of the file.
+ *
+ * It used to be restated, and it had drifted: `LOD_WAVE_COUNT = 3` over
+ * 110-430 m against the ocean's 4 waves over 100-400 m followed by 2 over
+ * 340-1000 m, with no second stage on the ribbon at all. The ribbon therefore
+ * dropped a 0.28 m wave the sea kept, and kept a 0.72 m pair the sea dropped -
+ * a worst-case 0.44 m of disagreement past 430 m, which is the racing line
+ * sawing through the drawn swell on the far side of the lap. Two constants that
+ * have to be equal should be one constant.
+ *
+ * `CAMERA_FAR` still mirrors `core/Engine.ts`, which is not this subsystem's
+ * file to change. Get it wrong and the Sobel pass mis-reads every course
+ * surface's depth.
  */
-const LOD_WAVE_COUNT = 3;
-const CHOP_FADE_START = 110;
-const CHOP_FADE_END = 430;
 const CAMERA_FAR = 4200;
 
 // --- racing line -------------------------------------------------------------
@@ -323,9 +335,17 @@ const RIBBON_FADE_END = 1700;
  *
  * The start/finish strip overrides both to zero - it is a mark you cross, and
  * it has to be there when you are on it.
+ *
+ * 6/19 is pulled in to 4/12. The wedge this fade exists to remove lives inside
+ * about 6 m - that is where the ribbon is wide enough on screen to interlock
+ * with the wake - so the far end of the old ramp was not buying anything, and
+ * from the chase camera, which sits ~10 m back, it meant the line only reached
+ * half strength level with the boat. At 4/12 it is fully in a little ahead of
+ * the bow and the wedge is still gone. Seven metres of stroke is a lot when
+ * there were 6 643 pixels of line on the water in the whole frame.
  */
-const RIBBON_NEAR_GONE = 6;
-const RIBBON_NEAR_FULL = 19;
+const RIBBON_NEAR_GONE = 4;
+const RIBBON_NEAR_FULL = 12;
 /** Length of the start/finish strip along the course, metres. */
 const START_STRIP_LENGTH = 6.5;
 /** How much wider than the course the start strip and the start gate are. */
@@ -771,13 +791,14 @@ export class Course {
     this.lineFogRangeU = lineFogRange;
 
     // --- racing line + start strip ------------------------------------------
-    const src = buildRaceLineShaders(LOD_WAVE_COUNT);
+    const src = buildRaceLineShaders(MID_WAVE_COUNT, FAR_WAVE_COUNT);
     const periods = Math.max(1, Math.round(this.totalLength / CHEVRON_TARGET));
     const chevronPeriod = this.totalLength / periods;
 
     const lineUniforms = (mode: number, half: number): Record<string, THREE.IUniform> => ({
       uTime: { value: 0 },
       uChopFade: { value: new THREE.Vector2(CHOP_FADE_START, CHOP_FADE_END) },
+      uSwellFade: { value: new THREE.Vector2(SWELL_FADE_START, SWELL_FADE_END) },
       uLift: { value: RIBBON_LIFT },
       uLiftSlope: { value: RIBBON_LIFT_SLOPE },
       // The racing line is green, and it is the palette's own raceLine green.
@@ -804,6 +825,40 @@ export class Course {
       // hard steps; the last is where the soft outer ramp finishes, and it runs
       // well inside the geometry so the strip never shows its own edge.
       uBands: { value: new THREE.Vector4(0.20, 0.58, 0.80, 1.0) },
+      /**
+       * What counts as edge-on, measured on the *water's* view-space normal.
+       *
+       * The camera rigs put the sea's normal at roughly 0.15 of view Z from the
+       * chase and low-water cameras and roughly 0.6 from the aerial one, so this
+       * window is 1 in the two views where the ribbon is a filament and ~0.1 in
+       * the one where it is already a legible circuit. That asymmetry is the
+       * whole safety argument for the boosts below: the ribbon covers fewest
+       * pixels exactly when it is edge-on, so a grazing-keyed boost cannot
+       * reproduce the green slab this line has been once - from altitude it is
+       * simply not switched on.
+       */
+      uGrazeEdges: { value: new THREE.Vector2(0.22, 0.70) },
+      /**
+       * x = core band scale, y = body band scale, z = added *body* gain,
+       * w = alpha multiplier - all at full grazing, all zero-weighted from above.
+       *
+       * The band scales move the *bright fraction* of the ribbon, not its
+       * silhouette: at 1.30 / 1.55 an edge-on strip goes from 20%/58% core/body
+       * to 26%/76%, so the handful of pixel rows it covers are mostly line
+       * instead of mostly sheath. The split between the two matters - 1.9 on the
+       * core was tried and it is wrong, because the core is `raceLineHot`, a
+       * near-white mint, and widening *that* turned the stroke pale: measured on
+       * the chase frame the line's mean saturation over water came out at 0.42
+       * while the pixel count barely moved. Growing the body instead grows the
+       * part of the ribbon that is actually green.
+       *
+       * 0.58 of body gain takes `raceLine` from luma 0.85 to 1.29, across the
+       * composer's 0.85 bright-pass threshold, so the line picks up the stylised
+       * bloom. Because it is a scalar multiply of the palette colour the hue is
+       * untouched, which is the point: green is the only cue that survives being
+       * composited over whitewater, and a white glow throws it away.
+       */
+      uGrazeGain: { value: new THREE.Vector4(1.30, 1.55, 0.58, 1.20) },
       uChevron: { value: new THREE.Vector2(1 / chevronPeriod, 0.42) },
       uScroll: { value: CHEVRON_SPEED },
       uOpacity: { value: RIBBON_OPACITY },

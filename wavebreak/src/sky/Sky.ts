@@ -22,9 +22,10 @@ import {
  *                 alphabet. Transparent, depth-written (their alpha is
  *                 near-binary, so writing depth is what gets cloud-vs-cloud
  *                 occlusion right regardless of instance order).
- *   3. `flare`  - a screen-space ornament: six radiating spikes and two
- *                 hard-edged hexagonal ghosts, anchored by projecting SUN_DIR to
- *                 NDC every frame. Additive, no depth test, drawn last.
+ *   3. `flare`  - a screen-space ornament: six hard-edged radiating rays,
+ *                 anchored by projecting SUN_DIR to NDC every frame. Additive,
+ *                 no depth test, drawn last. A drawn sunburst, not a lens
+ *                 simulation - see `buildFlareGeometry` for what was removed.
  *
  * Nothing in here is loaded: the cloud alphabet is drawn to a canvas at
  * construction, every mesh is built from BufferGeometry, and the only randomness
@@ -263,44 +264,47 @@ function makeCloudAtlas(r: Rng): THREE.Texture {
 // ------------------------------------------------------------ flare build ---
 
 interface FlarePiece {
-  /** 0 at the sun, 1 at the frame centre, > 1 past it. */
-  anchor: number;
   alpha: number;
   /** 0 = sun core white, 1 = sun glow gold. */
   tint: number;
-  /** 0 spike, 1 solid hexagon, 2 hexagon ring. */
-  kind: number;
-  /** Inner/outer radius ratio, ring only. */
-  ring: number;
   shimPhase: number;
   shimAmt: number;
 }
 
-/** Scratch accumulator for the flare's interleaved vertex data. */
+/** Scratch accumulator for the burst's interleaved vertex data. */
 class FlareBuild {
   readonly pos: number[] = [];    // vec3, z always 0
-  readonly local: number[] = [];  // vec2
-  readonly data: number[] = [];   // vec4
-  readonly misc: number[] = [];   // vec4
+  readonly data: number[] = [];   // vec3
+  readonly misc: number[] = [];   // vec2
   readonly index: number[] = [];
   count = 0;
 
-  vertex(x: number, y: number, lx: number, ly: number, edge: number, p: FlarePiece): void {
+  vertex(x: number, y: number, edge: number, p: FlarePiece): void {
     this.pos.push(x, y, 0);
-    this.local.push(lx, ly);
-    this.data.push(p.anchor, p.alpha, p.tint, edge);
-    this.misc.push(p.kind, p.ring, p.shimPhase, p.shimAmt);
+    this.data.push(p.alpha, p.tint, edge);
+    this.misc.push(p.shimPhase, p.shimAmt);
     this.count++;
   }
 }
 
 /**
- * A radiating spike, built as a long thin diamond: base on the axis, widest a
- * quarter of the way out, tapering to a point. The two on-axis vertices carry
- * edge = 1 and the two flanks edge = 0, which the fragment shader turns into a
- * bright spine with a one-pixel feather at the flanks.
+ * A radiating ray: widest at its base, tapering with straight sides to a point.
+ * Four vertices, two triangles - a base edge split at its midpoint so the
+ * midpoint and the tip can both carry edge = 1 while the two base corners carry
+ * edge = 0. The fragment shader cuts that interpolant into a hard-edged wedge
+ * with a hotter spine running down its centre.
+ *
+ * IT IS BUILT AS A TRIANGLE AND NOT AS A DIAMOND, and that is the whole shape.
+ * A diamond - base on the axis, widest a quarter of the way out, tapering to a
+ * point - is what a soft photographic streak is, and cut hard it stops reading
+ * as a ray at all: the bulge dominates and each one lands as a white leaf
+ * floating near the sun. A wedge that is widest where it leaves the disc and
+ * narrows all the way out is how a burst is actually drawn.
+ *
+ * rIn sits well inside the painted corona, so a ray is already tapering by the
+ * time it emerges from behind the halo and never shows a blunt end.
  */
-function pushSpike(
+function pushRay(
   b: FlareBuild,
   angle: number,
   rIn: number,
@@ -310,85 +314,81 @@ function pushSpike(
 ): void {
   const ca = Math.cos(angle);
   const sa = Math.sin(angle);
-  const rMid = rIn + (rOut - rIn) * 0.26;
-  const xs = [rIn, rMid, rOut, rMid];
-  const ys = [0, halfWidth, 0, -halfWidth];
-  const edges = [1, 0, 1, 0];
+  // base-left, base-centre (spine), base-right, tip (spine).
+  const xs = [rIn, rIn, rIn, rOut];
+  const ys = [halfWidth, 0, -halfWidth, 0];
+  const edges = [0, 1, 0, 1];
   const base = b.count;
   for (let i = 0; i < 4; i++) {
     const x = xs[i]!;
     const y = ys[i]!;
-    b.vertex(x * ca - y * sa, x * sa + y * ca, 0, 0, edges[i]!, p);
+    b.vertex(x * ca - y * sa, x * sa + y * ca, edges[i]!, p);
   }
-  b.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  b.index.push(base, base + 1, base + 3, base + 1, base + 2, base + 3);
 }
 
 /**
- * A hexagonal ghost: a quad carrying a shape-local coordinate that the fragment
- * shader feeds to a hexagon SDF. Rotating the quad in flare space while leaving
- * the local coordinate alone is what rotates the hexagon.
- */
-function pushGhost(b: FlareBuild, radius: number, rotation: number, p: FlarePiece): void {
-  // 1.16 of the SDF's unit radius: room for the anti-aliasing band and for the
-  // hexagon's corners, which reach further than its flats.
-  const pad = 1.16;
-  const cr = Math.cos(rotation);
-  const sr = Math.sin(rotation);
-  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-  const base = b.count;
-  for (const c of corners) {
-    const lx = c[0]! * pad;
-    const ly = c[1]! * pad;
-    const px = lx * radius;
-    const py = ly * radius;
-    b.vertex(px * cr - py * sr, px * sr + py * cr, lx, ly, 1, p);
-  }
-  b.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
-}
-
-/**
- * The flare's shapes, in screen units (1.0 = half the frame height).
+ * The burst's shapes, in screen units (1.0 = half the frame height).
  *
- * Six spikes at 60-degree spacing with alternating lengths - the pair on the
- * sun-to-centre axis longest, so the ornament has a clear direction - plus one
- * solid hexagon just inside the frame centre and one hexagon ring past it. The
- * whole set is graphic by construction: straight edges, flat fills, no falloff.
+ * Six rays at 60-degree spacing with alternating lengths - the pair on the
+ * sun-to-centre axis longest, so the ornament has a clear direction. Straight
+ * edges, flat fills, no falloff.
+ *
+ * WHAT WAS DELETED AND WHY. This used to also emit two hexagonal ghosts riding
+ * the sun-to-centre axis. They are gone, and the hexagon SDF in the fragment
+ * shader with them. They were the single most photographic thing in the frame:
+ * in the reference capture one landed as a flat dull-purple hexagon floating in
+ * open sky and the other as a large pale hexagonal outline lying across the
+ * horizon and the gate banner, where it read as a render bug rather than as
+ * light. They could not be tuned out either - a hexagon is an artefact of a
+ * physical iris diaphragm, which this game does not have and does not draw, and
+ * additive gold over saturated cobalt can only ever desaturate toward lavender.
+ * Removing them costs 2 quads / 4 triangles / 8 vertices and no draw call.
+ *
+ * The rays that remain are re-tuned for the hard mask that replaced the feather:
+ * shorter (the longest is 0.34 against a corona that measures ~0.15-0.20 screen
+ * units, so roughly two disc-radii rather than four), wider, and at much higher
+ * alpha. A soft ray had to stay faint to hide its own feather; a cut one does
+ * not, and a decisive white-hot ray is what stops the burst drifting to lavender.
  */
 function buildFlareGeometry(): THREE.BufferGeometry {
   const b = new FlareBuild();
 
-  const spikeLengths = [0.62, 0.30, 0.42, 0.62, 0.30, 0.42];
-  const spikeWidths = [0.013, 0.008, 0.010, 0.013, 0.008, 0.010];
-  const spikeAlpha = [0.55, 0.30, 0.38, 0.55, 0.30, 0.38];
-  const spikeTint = [0.18, 0.85, 0.62, 0.18, 0.85, 0.62];
+  // Lengths are set against the corona, which measures ~0.15 screen units on the
+  // horizon rig and ~0.20 on the 58-degree racing rigs: the long pair reaches
+  // about 2.7 halo-radii, the short pair barely clears it. Everything is quoted
+  // from the sun's CENTRE, so the visible part of a ray is what is left after the
+  // halo covers the first ~0.15-0.20 of it.
+  const rayLengths = [0.42, 0.26, 0.33, 0.42, 0.26, 0.33];
+  // Thin. The disc is the drawing and the rays are the accent, not the other way
+  // round: at 0.032 the wedges were wider than the core itself and, being
+  // additive, simply whited the gold corona out from the inside.
+  const rayWidths = [0.020, 0.013, 0.016, 0.020, 0.013, 0.016];
+  const rayAlpha = [0.80, 0.48, 0.62, 0.80, 0.48, 0.62];
+  // Pulled toward the core cream. Gold-dominant rays were what desaturated to
+  // lavender against the cobalt sky; cream-dominant ones read as hot light.
+  const rayTint = [0.10, 0.52, 0.34, 0.10, 0.52, 0.34];
 
   for (let i = 0; i < 6; i++) {
-    pushSpike(b, (i * Math.PI) / 3, 0.035, spikeLengths[i]!, spikeWidths[i]!, {
-      anchor: 0,
-      alpha: spikeAlpha[i]!,
-      tint: spikeTint[i]!,
-      kind: 0,
-      ring: 1,
+    // Base at 0.055, i.e. between the core disc (0.041 screen units on the
+    // horizon rig) and ring 1 (0.059) - far enough out that the wedge's blunt
+    // base is buried inside the painted corona, close enough that no gap can
+    // open between the disc and the rays leaving it.
+    pushRay(b, (i * Math.PI) / 3, 0.055, rayLengths[i]!, rayWidths[i]!, {
+      alpha: rayAlpha[i]!,
+      tint: rayTint[i]!,
       // Phases spread over the circle so the six never pulse in unison.
       shimPhase: i * 1.05,
-      shimAmt: 0.10 + (i % 3) * 0.035,
+      // Smaller than it was: scaling a hard-edged shape is far more visible
+      // than scaling a feathered one, and a burst that throbs reads as a bloom.
+      shimAmt: 0.06 + (i % 3) * 0.02,
     });
   }
 
-  pushGhost(b, 0.075, 0.22, {
-    anchor: 0.45, alpha: 0.24, tint: 1.0, kind: 1, ring: 1,
-    shimPhase: 2.4, shimAmt: 0.045,
-  });
-  pushGhost(b, 0.130, -0.14, {
-    anchor: 1.25, alpha: 0.30, tint: 1.0, kind: 2, ring: 0.74,
-    shimPhase: 4.1, shimAmt: 0.035,
-  });
-
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
-  g.setAttribute('aLocal', new THREE.Float32BufferAttribute(b.local, 2));
-  g.setAttribute('aData', new THREE.Float32BufferAttribute(b.data, 4));
-  g.setAttribute('aMisc', new THREE.Float32BufferAttribute(b.misc, 4));
+  g.setAttribute('aData', new THREE.Float32BufferAttribute(b.data, 3));
+  g.setAttribute('aMisc', new THREE.Float32BufferAttribute(b.misc, 2));
   g.setIndex(b.index);
   // The vertex shader writes clip space directly, so the geometry's own bounds
   // are meaningless. Give it one big enough that nothing ever culls it.

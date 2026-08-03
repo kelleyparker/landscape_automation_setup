@@ -83,6 +83,9 @@ const V_TOPSIDE = new THREE.Color(1, 1, 1);
 const V_SPRAY = new THREE.Color(0.66, 0.66, 0.66);
 const V_BOTTOM = new THREE.Color(0.38, 0.38, 0.38);
 
+/** Scratch for `Mesher.fan`'s hub colour. Build-time only; never touched per frame. */
+const _hub = new THREE.Color();
+
 /**
  * Eleven stations from transom to stem. Spacing tightens forward, where the
  * section changes fastest - an even spread puts the same number of rings under
@@ -338,19 +341,29 @@ class Mesher {
    * Skins a run of rings. `rings[r]` is a flat xyz list of the same length for
    * every ring. Returns each ring's first vertex index so callers can cap the
    * ends without re-emitting the boundary.
+   *
+   * `profileColors`, when given, replaces `color` point by point along the
+   * profile - the same list for every ring, so a value block runs the length of
+   * the loft. Paired with a duplicated crease point it gives a *hard* step:
+   * the two copies sit at the same place, the quad between them is skipped, and
+   * the interpolator never gets to smear one band into the next.
    */
   loft(
     rings: readonly number[][],
     color: THREE.Color,
     closed = false,
     skip: readonly boolean[] | null = null,
+    profileColors: readonly THREE.Color[] | null = null,
   ): number[] {
     const n = rings[0]!.length / 3;
     const base: number[] = [];
     for (const ring of rings) {
       base.push(this.pos.length / 3);
       for (let i = 0; i < n; i++) {
-        this.vertex(ring[i * 3]!, ring[i * 3 + 1]!, ring[i * 3 + 2]!, color);
+        this.vertex(
+          ring[i * 3]!, ring[i * 3 + 1]!, ring[i * 3 + 2]!,
+          profileColors ? profileColors[i]! : color,
+        );
       }
     }
     const segs = closed ? n : n - 1;
@@ -369,15 +382,37 @@ class Mesher {
   /**
    * Closes a ring with a centroid fan. `flip` reverses the winding for the end of
    * a run, where the surface normal points the other way.
+   *
+   * `pointColors` carries a value block round the outline. A fan cannot hold a
+   * hard step - every triangle has the hub in it - so the hub takes the mean of
+   * the rim and the face comes out graded rather than banded. On the transom
+   * that is still the difference between a flat plate of racer colour and a face
+   * that is light at the sheer and dark at the keel.
    */
-  fan(ring: readonly number[], color: THREE.Color, flip: boolean): void {
+  fan(
+    ring: readonly number[],
+    color: THREE.Color,
+    flip: boolean,
+    pointColors: readonly THREE.Color[] | null = null,
+  ): void {
     const n = ring.length / 3;
     let cx = 0, cy = 0, cz = 0;
-    for (let i = 0; i < n; i++) { cx += ring[i * 3]!; cy += ring[i * 3 + 1]!; cz += ring[i * 3 + 2]!; }
-    const c = this.vertex(cx / n, cy / n, cz / n, color);
+    let mr = 0, mg = 0, mb = 0;
+    for (let i = 0; i < n; i++) {
+      cx += ring[i * 3]!; cy += ring[i * 3 + 1]!; cz += ring[i * 3 + 2]!;
+      const pc = pointColors ? pointColors[i]! : color;
+      mr += pc.r; mg += pc.g; mb += pc.b;
+    }
+    // Fields, not `setRGB`: `setRGB` takes a colour space and the last thing
+    // this project needs is another implicit sRGB decode in the pipeline.
+    _hub.r = mr / n; _hub.g = mg / n; _hub.b = mb / n;
+    const c = this.vertex(cx / n, cy / n, cz / n, _hub);
     const first = this.pos.length / 3;
     for (let i = 0; i < n; i++) {
-      this.vertex(ring[i * 3]!, ring[i * 3 + 1]!, ring[i * 3 + 2]!, color);
+      this.vertex(
+        ring[i * 3]!, ring[i * 3 + 1]!, ring[i * 3 + 2]!,
+        pointColors ? pointColors[i]! : color,
+      );
     }
     for (let i = 0; i < n; i++) {
       const a = first + i;
@@ -486,8 +521,43 @@ function rakeZ(s: number, y: number): number {
   return ST_Z[s]! + r * ((deck - y) / (deck - ST_KEEL[s]!));
 }
 
-/** Knuckle height: a fixed fraction of the freeboard above the chine. */
-const KNUCK_RISE = 0.26;
+/**
+ * Knuckle height: a fixed fraction of the freeboard above the chine.
+ *
+ * 0.36, not the 0.26 it was. The band between the knuckle and the chine is the
+ * hull's bootstripe, and at 0.26 it was a 10 cm sliver at station 2 - of which
+ * the sponson, whose deck tops out 12 cm lower, hides the bottom third from any
+ * camera at or above deck height. Whatever value that band is painted, a sliver
+ * is not a stripe. 0.36 makes it 15 cm against a 26 cm topside, which is the
+ * proportion a real boot-top runs at and is legible at the distance a pack shot
+ * puts the boat.
+ *
+ * It is not free: the topside panel that carries the racing number shortens with
+ * it, so `addTopsidePlate` re-centres and shrinks the plate to keep its ink
+ * border clear of the sheer. Change one, check the other.
+ */
+const KNUCK_RISE = 0.36;
+
+/**
+ * Value multiplier per point of `hullProfile`, in profile order.
+ *
+ *   0,1 / 15,16   sheer and knuckle-upper       -> topside, full value
+ *   2,3 / 13,14   knuckle-lower and chine-upper -> spray band
+ *   4..12         chine-lower, bottom, keel     -> bottom
+ *
+ * The two steps land on 1|2 and 3|4 (and their mirrors), which are exactly the
+ * duplicated crease pairs the loft skips - so each step is a hard edge on the
+ * knuckle and on the chine rather than a gradient across a panel.
+ */
+const HULL_VALUES: readonly THREE.Color[] = (() => {
+  const v: THREE.Color[] = [];
+  for (let i = 0; i < HULL_PROFILE_N; i++) {
+    if (i <= 1 || i >= 15) v.push(V_TOPSIDE);
+    else if (i <= 3 || i >= 13) v.push(V_SPRAY);
+    else v.push(V_BOTTOM);
+  }
+  return v;
+})();
 
 /**
  * One hull cross-section, port sheer -> keel -> starboard sheer.
@@ -605,7 +675,7 @@ function sliceRings(rings: readonly number[][], i0: number, i1: number): number[
 
 function buildHullGroup(): THREE.BufferGeometry {
   const m = new Mesher();
-  const c = NEUTRAL;
+  const c = V_TOPSIDE;
 
   const hullRings: number[][] = [];
   for (let s = 0; s < ST_Z.length; s++) hullRings.push(hullProfile(s));
@@ -613,7 +683,7 @@ function buildHullGroup(): THREE.BufferGeometry {
 
   // Rings run stern -> bow (dv = +Z), profile runs port -> starboard (du = +X on
   // the bottom), so cross(du, dv) = -Y: outward, because the bottom faces down.
-  m.loft(hullRings, c, false, HULL_SKIP);
+  m.loft(hullRings, c, false, HULL_SKIP, HULL_VALUES);
   // Side decks: the two outboard strips of the deck, in the racer's colour. The
   // centre belongs to the dark group; see DECK_U.
   m.loft(sliceRings(deck, 0, DECK_SEAM_A), c, false);
@@ -627,12 +697,12 @@ function buildHullGroup(): THREE.BufferGeometry {
   // fan has to be reversed to face -Z; seen from ahead the same list runs
   // counter-clockwise and the stem's fan does not. Getting this backwards leaves
   // the boat with a hole where the chase camera spends the entire race looking.
-  m.fan(capOutline(hullRings[0]!, deck[0]!), c, true);
+  m.fan(capOutline(hullRings[0]!, deck[0]!), c, true, CAP_VALUES);
   const last = ST_Z.length - 1;
-  m.fan(capOutline(hullRings[last]!, deck[last]!), c, false);
+  m.fan(capOutline(hullRings[last]!, deck[last]!), c, false, CAP_VALUES);
 
-  buildSponsons(m, c);
-  return m.toGeometry('boatHull', false);
+  buildSponsons(m);
+  return m.toGeometry('boatHull', true);
 }
 
 /**
@@ -655,6 +725,17 @@ function capOutline(hull: number[], deck: number[]): number[] {
   return out;
 }
 
+/** `HULL_VALUES` walked the same way `capOutline` walks the profile. */
+const CAP_VALUES: readonly THREE.Color[] = (() => {
+  const out: THREE.Color[] = [];
+  for (let i = 0; i < HULL_PROFILE_N; i++) {
+    if (HULL_DUP.includes(i)) continue;
+    out.push(HULL_VALUES[i]!);
+  }
+  for (let i = 1; i < DECK_U.length - 1; i++) out.push(V_TOPSIDE);
+  return out;
+})();
+
 /**
  * Sponson stations: z, outer x, inner x, top y, bottom y.
  *
@@ -674,7 +755,7 @@ const SPON_Z: readonly number[] =     [-2.02, -1.40, -0.70,  0.10,  0.85,  1.45,
 const SPON_OUT: readonly number[] =   [ 0.94,  1.10,  1.14,  1.12,  1.00,  0.78,  0.52];
 const SPON_IN: readonly number[] =    [ 0.70,  0.80,  0.82,  0.80,  0.68,  0.50,  0.32];
 /**
- * Pod deck. Held a clear 5-8 cm BELOW the hull's knuckle line the whole way, so
+ * Pod deck. Held a clear 9-13 cm BELOW the hull's knuckle line the whole way, so
  * the topside overhangs its own sponson and casts a hard horizontal shadow onto
  * it. When the two lines were level the pod was just a bulge in the flank; the
  * daylight under the overhang is what makes it a separate form.
@@ -695,7 +776,14 @@ const SPON_BOT: readonly number[] =   [-0.120,-0.145,-0.135,-0.095,-0.015, 0.115
  * advance +Z), mirrored for port - the mirror flips the handedness, so the port
  * ring list is reversed to put the winding back.
  */
-function buildSponsons(m: Mesher, c: THREE.Color): void {
+function buildSponsons(m: Mesher): void {
+  const c = V_SPRAY;
+  // Same descending block as the hull: the cheek and the pod deck ride with the
+  // spray band, the underside pad with the bottom. The step falls on the lower
+  // cheek, so each pod carries its own waterline instead of being one solid
+  // wedge of racer colour - which is what four of them looked like in a pack.
+  const vals: readonly THREE.Color[] = [V_SPRAY, V_SPRAY, V_SPRAY, V_BOTTOM, V_BOTTOM, V_BOTTOM];
+  const valsPort = vals.slice().reverse();
   for (const sgn of [1, -1]) {
     const rings: number[][] = [];
     for (let i = 0; i < SPON_Z.length; i++) {
@@ -717,9 +805,10 @@ function buildSponsons(m: Mesher, c: THREE.Color): void {
       for (const p of loop) ring.push(sgn * p[0]!, p[1]!, z);
       rings.push(ring);
     }
-    m.loft(rings, c, true);
-    m.fan(rings[0]!, c, sgn > 0);
-    m.fan(rings[rings.length - 1]!, c, sgn < 0);
+    const pv = sgn > 0 ? vals : valsPort;
+    m.loft(rings, c, true, null, pv);
+    m.fan(rings[0]!, c, sgn > 0, pv);
+    m.fan(rings[rings.length - 1]!, c, sgn < 0, pv);
   }
 }
 
@@ -794,6 +883,39 @@ const AFT_COWL: readonly ShellStation[] = [
   { z: -0.68, hw: 0.36, base: 0.35, top: 0.68 },
 ];
 
+/**
+ * DASH BINNACLE.
+ *
+ * The foredeck was two large smooth lobes with a specular lozenge on each and
+ * nothing else - a lid, not a designed craft, and it is the single largest thing
+ * in the bow and rider frames. This is a moulded pod standing on the crown of
+ * the fore cowl: 10 cm proud at its shoulder, faired back into the cowl by
+ * z = 1.10, and back-canted at the aft end so it presents the rider a dash face
+ * rather than a wall. The steering column is born inside it, which is what the
+ * column's own comment has always claimed and could not previously show.
+ *
+ * Half-width is capped at 0.200 because the grips are at |x| = 0.26 and the
+ * gloves hang below them; at full lock the inboard grip swings to |x| = 0.231
+ * and *aft*, the outboard one to 0.266 and forward over the pod's widest
+ * station. 3 cm of daylight at the worst case, and none of it in Y - the pod
+ * tops out at 0.918 against a glove that bottoms out at about 0.925.
+ *
+ * `suitDark`, not `hullDark`: it sits on a `hullDark` cowl, and two identical
+ * darks in contact are one shapeless mass - the same reason the centre deck is
+ * suitDark. No new colour on the boat either way.
+ *
+ * Cost: 86 triangles, shared by all four boats.
+ */
+const BINNACLE: readonly ShellStation[] = [
+  { z: 0.585, hw: 0.176, base: 0.630, top: 0.828 },
+  { z: 0.700, hw: 0.200, base: 0.650, top: 0.906 },
+  { z: 0.860, hw: 0.192, base: 0.700, top: 0.918 },
+  { z: 1.020, hw: 0.158, base: 0.760, top: 0.896 },
+  { z: 1.160, hw: 0.112, base: 0.820, top: 0.858 },
+];
+/** Shoulder creases on the binnacle, so it takes three bands and inks its edges. */
+const BINN_CREASE: readonly number[] = [2, 6];
+
 /*
  * THERE IS NO WINDSCREEN.
  *
@@ -838,10 +960,17 @@ function buildCoaming(m: Mesher, c: THREE.Color): void {
     const iu = uc - (nu / nl) * COAM_WALL;
     const oy = deckYAt(oz, ou);
     const iy = deckYAt(iz, iu);
+    // Brow: the lip stands half again as tall along the *flanks* of the well and
+    // drops back to nothing fore and aft. Not the other way round - the forward
+    // end of this ellipse is at z = 0.85, which is inside the fore cowl, so a
+    // taller lip there is buried and costs the frame nothing but vertices. The
+    // sides are what the bow and chase cameras see beside the rider's knees, and
+    // they are the only vertical face on that half of the deck.
+    const lift = COAM_LIFT * (1 + 0.55 * Math.abs(su));
     rings.push([
       ou * deckHalfAt(oz), oy - 0.03, oz,
-      ou * deckHalfAt(oz), oy + COAM_LIFT, oz,
-      iu * deckHalfAt(iz), iy + COAM_LIFT * 0.72, iz,
+      ou * deckHalfAt(oz), oy + lift, oz,
+      iu * deckHalfAt(iz), iy + lift * 0.72, iz,
       iu * deckHalfAt(iz), iy - 0.06, iz,
     ]);
   }
@@ -906,6 +1035,14 @@ function buildDarkGroup(): THREE.BufferGeometry {
     // arch alone is convex and does exactly that.
     m.fan(rings[0]!, dark, true);
     m.fan(rings[rings.length - 1]!, dark, false);
+  }
+
+  // Dash binnacle, one value step lighter than the cowl it stands on.
+  {
+    const rings = BINNACLE.map((st) => shellRing(st, 0.50, BINN_CREASE));
+    m.loft(rings, PALETTE.suitDark, false, shellSkip(BINN_CREASE));
+    m.fan(rings[0]!, PALETTE.suitDark, true);
+    m.fan(rings[rings.length - 1]!, PALETTE.suitDark, false);
   }
 
   buildCoaming(m, dark);
@@ -1072,10 +1209,102 @@ function addPlate(
   }
 }
 
+/** Chine strake: how far it stands outboard of the knuckle, and half its height. */
+const STRAKE_PROUD = 0.026;
+const STRAKE_HALF_H = 0.018;
+
+/**
+ * A rubbing strake along the knuckle, from transom to stem.
+ *
+ * The value block either side of the knuckle already puts a step there, and a
+ * step in albedo alone is a painted line - it survives the ramp but it gives the
+ * edge pass nothing, and in flat light it is the only thing separating the
+ * topside from the spray band. This is the same argument the deck rails won: a
+ * real strake standing 26 mm proud has two vertical cheeks, so it takes its own
+ * band *and* draws its own ink line, whatever the sun is doing.
+ *
+ * `hullDark`, not `hullTrim`. The boat already spends its yellow on two deck
+ * rails, the fin(s), the spoiler and three number plates; two more full-length
+ * yellow rails at the waterline would make it a yellow boat with coloured
+ * panels. A dark rubbing strake is what the real part is anyway, and it reads
+ * against every racer colour in the grid rather than against three of them.
+ *
+ * Faired to nothing forward, where the knuckle converges on the stem and a rail
+ * at full section would stand outboard of the sheer.
+ *
+ * Winding follows the sponsons exactly: rings advance +Z and the starboard
+ * section is listed counter-clockwise seen from +Z, which puts cross(du, dv)
+ * outboard; the port list is reversed because the mirror flips the handedness.
+ *
+ * Cost: 88 triangles a side, 176 a boat.
+ */
+function buildChineStrake(m: Mesher): void {
+  const c = PALETTE.hullDark;
+  for (const sgn of [1, -1]) {
+    const rings: number[][] = [];
+    for (let s = 0; s < ST_Z.length; s++) {
+      const hb = ST_HB[s]!;
+      const chine = ST_CHINE[s]!;
+      const deck = ST_DECK[s]!;
+      const ky = chine + (deck - chine) * KNUCK_RISE;
+      const kx = hb * ST_KNUCK[s]!;
+      const z = rakeZ(s, ky);
+      const p = STRAKE_PROUD * Math.min(1, hb / 0.42);
+      const h = STRAKE_HALF_H * Math.min(1, 0.35 + hb);
+      // The inner pair is set 10 mm inboard of the knuckle so the rail's roots
+      // are buried in the topside rather than floating a hairline off it - the
+      // hull tucks in above and below the knuckle, and at this height that is
+      // about how far it has tucked.
+      const loop: number[][] = [
+        [kx + p, ky - h * 0.55],   // outer bottom
+        [kx + p, ky + h * 0.55],   // outer top
+        [kx - 0.010, ky + h],      // inner top
+        [kx - 0.010, ky - h],      // inner bottom
+      ];
+      if (sgn < 0) loop.reverse();
+      const ring: number[] = [];
+      for (const q of loop) ring.push(sgn * q[0]!, q[1]!, z);
+      rings.push(ring);
+    }
+    m.loft(rings, c, true);
+    m.fan(rings[0]!, c, sgn > 0);
+    m.fan(rings[rings.length - 1]!, c, sgn < 0);
+  }
+}
+
+/**
+ * Instrument face on the back of the dash binnacle.
+ *
+ * The binnacle's aft-upper surface (see BINNACLE) rises 0.078 m over 0.115 m of
+ * Z, i.e. a face canted 34 degrees back toward the rider - the panel lies in it,
+ * 10 mm proud, with a dark bezel under it. Yellow, because it is the one thing
+ * on the foredeck the rider is supposed to be looking at, and because a fourth
+ * colour on the boat is not on offer.
+ *
+ * `u` is -X and `v` runs up the cant, so `u x v` = (0, 0.828, -0.561): up and
+ * aft, out of the face and into the rider's eyeline.
+ */
+function addInstrumentFace(m: Mesher): void {
+  const nx = 0, ny = 0.828, nz = -0.561;
+  const vx = 0, vy = 0.561, vz = 0.828;
+  const cy = 0.867, cz = 0.6425;
+  m.panel(
+    nx * 0.004, cy + ny * 0.004, cz + nz * 0.004,
+    -1, 0, 0, vx, vy, vz, 0.114, 0.058, PALETTE.hullDark,
+  );
+  m.panel(
+    nx * 0.011, cy + ny * 0.011, cz + nz * 0.011,
+    -1, 0, 0, vx, vy, vz, 0.094, 0.041, PALETTE.hullTrim,
+  );
+}
+
 function buildTrimGroup(index: number): THREE.BufferGeometry {
   const m = new Mesher();
   const trim = PALETTE.hullTrim;
   const slot = index & 3;
+
+  buildChineStrake(m);
+  addInstrumentFace(m);
 
   // --- livery rails --------------------------------------------------------
   // Raised strakes, not painted stripes. A decal offset a centimetre along +Y is
@@ -1239,10 +1468,17 @@ function addTopsidePlate(m: Mesher, digit: number, z: number, side: number): voi
   const lift = 0.010;
   // Centred a little high on the panel and sized to the panel's own height, so
   // the ink border always clears the sheer and the knuckle.
-  const cx = side * (knuckX + dx * 0.56);
-  const cy = knuckY + dy * 0.56;
+  //
+  // 0.54 and 0.100, down from 0.56 and 0.105: KNUCK_RISE went to 0.36 and the
+  // panel it sits on lost 4 cm with it. At station -1.30 the panel is 0.2998 m
+  // long, the ink border half-height is 0.122, and the centre lands at 0.1619 -
+  // so the border tops out at 0.2839 and bottoms out at 0.0399, clear of the
+  // sheer by 16 mm and of the knuckle by 40 mm. At the old numbers it overran
+  // the sheer by 2 mm.
+  const cx = side * (knuckX + dx * 0.54);
+  const cy = knuckY + dy * 0.54;
   const hw = 0.160;
-  const hh = 0.105;
+  const hh = 0.100;
   // Ink border: a slightly larger dark panel just under the cream one.
   m.panel(
     cx + nx * lift * 0.5, cy + ny * lift * 0.5, z,
@@ -1445,6 +1681,10 @@ export function buildBoatVisual(index: number, color: THREE.Color): BoatVisual {
   const hullMaterial = makeCelMaterial({
     ...CEL_PRESETS.hull(color),
     ...BOAT_RIM,
+    // The racer's colour is the material's `uColor`; the geometry's colour
+    // attribute is the pure-grey value block that turns one lofted surface into
+    // a topside over a spray band over a bottom. See V_TOPSIDE.
+    vertexColors: true,
     name: `BoatHull${index}`,
   });
 

@@ -14,11 +14,14 @@ import { GBUFFER_OUT, OCT_PACK, GBUFFER_WRITE } from '../../render/shaders/celCh
  *     parameter space* and pushed through the same map, so it lands exactly on
  *     the water by construction. Nothing here re-derives a wave.
  *
- *     That includes the ocean's distance LOD. Past `uChopFade.x` the ocean drops
- *     the three short waves (0.49 m of amplitude between them); a ribbon that
- *     kept all six would visibly saw through the sea at range. The same two
- *     evaluators are generated here and blended with the same smoothstep, so the
- *     two surfaces agree at every distance, not just up close.
+ *     That includes the ocean's distance LOD, which is a two-stage cascade: the
+ *     two chop layers go between `uChopFade.x` and `.y`, then the two mid waves
+ *     between `uSwellFade.x` and `.y`. A ribbon that kept all six would visibly
+ *     saw through the sea at range - and so did the ribbon that kept a
+ *     *different* three. Both term counts and both fade ranges are now imported
+ *     from `Ocean.ts` by the caller and the same three evaluators are generated
+ *     here, so the two surfaces agree at every distance by construction rather
+ *     than by two files being kept in step by hand.
  *
  *  2. **A cel glow is concentric hard bands.** Not a gaussian, not an additive
  *     smear. The line is an ink edge, an outer band, a body band and a hot core,
@@ -51,17 +54,19 @@ function patchGeneratedWaveGLSL(src: string): string {
 }
 
 /**
- * The reduced-wave evaluator, generated from the *same* source of truth and
- * renamed so both can live in one translation unit. Mirrors `lodGerstnerGLSL`
- * in `ocean/shaders/water.ts` - if that file's LOD changes, this must follow it
- * or the line and the sea stop agreeing beyond the fade.
+ * The reduced-wave evaluators, generated from the *same* source of truth and
+ * renamed so several can live in one translation unit. Character-for-character
+ * the same helper `ocean/shaders/water.ts` uses, and it is called with the term
+ * counts `Ocean.ts` exports - so "if that file's LOD changes, this must follow
+ * it" is no longer a thing anyone has to remember.
  */
-function lodGerstnerGLSL(count: number): string {
+function lodGerstnerGLSL(count: number, suffix: string): string {
+  const tag = suffix.toUpperCase();
   return patchGeneratedWaveGLSL(gerstnerGLSL(TERMS.slice(0, count)))
-    .replace(/wbWaveSurface/g, 'wbWaveSurfaceLod')
-    .replace(/wbWaveDisplace/g, 'wbWaveDisplaceLod')
-    .replace(/WB_WAVE_COUNT/g, 'WB_LOD_WAVE_COUNT')
-    .replace(/WB_MAX_WAVE_HEIGHT/g, 'WB_LOD_MAX_WAVE_HEIGHT');
+    .replace(/wbWaveSurface/g, `wbWaveSurface${suffix}`)
+    .replace(/wbWaveDisplace/g, `wbWaveDisplace${suffix}`)
+    .replace(/WB_WAVE_COUNT/g, `WB_${tag}_WAVE_COUNT`)
+    .replace(/WB_MAX_WAVE_HEIGHT/g, `WB_${tag}_MAX_WAVE_HEIGHT`);
 }
 
 /**
@@ -114,15 +119,27 @@ export interface CourseShaderSource {
  * sea in the vertex shader - and giving them two programs would only cost a
  * second compile and a second pipeline switch for a dozen ALU ops of difference.
  *
- * @param lodWaveCount how many of the six waves survive at long range; MUST be
- *        the same value `Ocean.ts` passes to `buildWaterShaders`.
+ * @param midWaveCount terms surviving the ocean's first (chop) fade
+ * @param farWaveCount terms surviving the ocean's second (mid-wave) fade
+ *
+ * Both are imported straight from `Ocean.ts` by the caller, along with the two
+ * fade ranges, so the ribbon and the sea cannot disagree by construction. They
+ * used to: this file claimed "the two surfaces agree at every distance" while
+ * the ribbon ran 3 waves over 110-430 m against the ocean's 4 over 100-400 m and
+ * then 2 over 340-1000 m, with no second stage here at all. Worst case that is
+ * 0.28 m of disagreement at mid range and 0.44 m past 430 m - the ribbon sawing
+ * through the drawn swell exactly where the far side of the lap is.
  */
-export function buildRaceLineShaders(lodWaveCount: number): CourseShaderSource {
+export function buildRaceLineShaders(
+  midWaveCount: number,
+  farWaveCount: number
+): CourseShaderSource {
   const vertexShader = /* glsl */ `
 precision highp float;
 
 ${patchGeneratedWaveGLSL(gerstnerGLSL())}
-${lodGerstnerGLSL(lodWaveCount)}
+${lodGerstnerGLSL(midWaveCount, 'Mid')}
+${lodGerstnerGLSL(farWaveCount, 'Far')}
 
 /** -1 .. +1 across the ribbon. */
 in float aSide;
@@ -133,6 +150,8 @@ in float aDist;
 uniform float uTime;
 /** x = where the ocean starts dropping its chop, y = where it is fully gone. */
 uniform vec2  uChopFade;
+/** The ocean's second stage: where the two mid waves fade out in turn. */
+uniform vec2  uSwellFade;
 /** Constant lift off the surface, and a per-metre term that buys depth-buffer
     headroom at range without ever reading as the line floating. */
 uniform float uLift;
@@ -162,24 +181,51 @@ void main() {
   // always the larger. Evaluating it the same way from the *undisplaced* point,
   // as the ocean does, makes the two fades identical rather than merely similar.
   float viewDist = distance(vec3(p.x, 0.0, p.y), cameraPosition);
-  float detail = 1.0 - smoothstep(uChopFade.x, uChopFade.y, viewDist);
+
+  // The same two-stage cascade the ocean runs, with the same term counts and the
+  // same fade ranges, blended with the same smoothsteps. This block is a
+  // deliberate transcription of the one in ocean/shaders/water.ts: a ribbon that
+  // sheds a different number of waves at a different distance does not "nearly
+  // agree" with the sea, it saws through it, and the difference is a third of a
+  // metre at the far side of the lap.
+  float detailChop  = 1.0 - smoothstep(uChopFade.x,  uChopFade.y,  viewDist);
+  float detailSwell = 1.0 - smoothstep(uSwellFade.x, uSwellFade.y, viewDist);
 
   vec3 pos;
   vec3 nrm;
   float jac;
-  if (detail >= 0.999) {
+
+  if (detailChop >= 0.999) {
     wbWaveSurface(p, uTime, pos, nrm, jac);
-  } else if (detail <= 0.001) {
-    wbWaveSurfaceLod(p, uTime, pos, nrm, jac);
   } else {
-    vec3 posLod;
-    vec3 nrmLod;
-    float jacLod;
-    wbWaveSurfaceLod(p, uTime, posLod, nrmLod, jacLod);
-    wbWaveSurface(p, uTime, pos, nrm, jac);
-    pos = mix(posLod, pos, detail);
-    nrm = normalize(mix(nrmLod, nrm, detail));
-    jac = mix(jacLod, jac, detail);
+    vec3 posBase;
+    vec3 nrmBase;
+    float jacBase;
+    if (detailSwell >= 0.999) {
+      wbWaveSurfaceMid(p, uTime, posBase, nrmBase, jacBase);
+    } else if (detailSwell <= 0.001) {
+      wbWaveSurfaceFar(p, uTime, posBase, nrmBase, jacBase);
+    } else {
+      vec3 posFar;
+      vec3 nrmFar;
+      float jacFar;
+      wbWaveSurfaceFar(p, uTime, posFar, nrmFar, jacFar);
+      wbWaveSurfaceMid(p, uTime, posBase, nrmBase, jacBase);
+      posBase = mix(posFar, posBase, detailSwell);
+      nrmBase = normalize(mix(nrmFar, nrmBase, detailSwell));
+      jacBase = mix(jacFar, jacBase, detailSwell);
+    }
+
+    if (detailChop <= 0.001) {
+      pos = posBase;
+      nrm = nrmBase;
+      jac = jacBase;
+    } else {
+      wbWaveSurface(p, uTime, pos, nrm, jac);
+      pos = mix(posBase, pos, detailChop);
+      nrm = normalize(mix(nrmBase, nrm, detailChop));
+      jac = mix(jacBase, jac, detailChop);
+    }
   }
 
   // The lift is a depth-buffer allowance, not a look. 5 cm clears z-fighting out
@@ -224,6 +270,18 @@ uniform vec3  uInk;       // the dark checker square on the start strip
 uniform vec3  uSun;
 /** Band edges across |side|: x core, y body, z sheath, w where alpha reaches 0. */
 uniform vec4  uBands;
+/**
+ * Where the ribbon counts as edge-on, read off abs(vViewNormal.z). The normal
+ * is the *water's*, so this is the angle between the sea and the eye: ~0.15 from
+ * the chase and low-water cameras, ~0.6 from altitude.
+ */
+uniform vec2  uGrazeEdges;
+/**
+ * How far the core and body bands grow when edge-on, and what comes with it.
+ * x = core band scale, y = body band scale, z = added *body* gain, w = opacity
+ * multiplier - all at full grazing, all inert from above.
+ */
+uniform vec4  uGrazeGain;
 /** x = 1 / chevron period (per metre), y = how far the V is swept back. */
 uniform vec2  uChevron;
 /** Chevron travel in metres/second, in the direction of travel. */
@@ -256,9 +314,34 @@ void main() {
   // crosses, which is exactly the artefact this ramp removes: past uBands.z the
   // alpha simply runs out, so the ribbon dissolves under the churn instead of
   // fighting it for the same pixels.
+  // --- the grazing term -----------------------------------------------------
+  // From altitude the ribbon is a clean legible circuit; from the chase camera
+  // it is a filament, because a 3.5 m strip seen almost edge-on covers a handful
+  // of pixel rows and most of those rows are the soft sheath. Measured on the
+  // reference frames: 1 662 pixels of race-line green anywhere on the water in
+  // chase, out of 3.7 M.
+  //
+  // The fix has to be keyed to *that*, not applied globally, or it turns the
+  // aerial view back into the green slab this ribbon has already been once. So
+  // it is keyed to the water's own facing: the ribbon covers fewest pixels
+  // exactly when it is edge-on and most when it faces the camera, which makes a
+  // grazing-weighted boost self-limiting by construction. From altitude graze
+  // is ~0.1 and every term below switches itself off.
+  float face = abs(normalize(vViewNormal).z);
+  float graze = 1.0 - smoothstep(uGrazeEdges.x, uGrazeEdges.y, face);
+
+  // Widen the bright fraction, not the ribbon. Only the core and body edges move;
+  // uBands.z and .w - the sheath and the alpha-zero point, i.e. the actual
+  // silhouette - are left exactly where they are, so the line never gets *wider*
+  // on screen, it just stops being mostly sheath. The clamps keep the ordering
+  // core < body < sheath intact at any gain.
+  vec4 bands = uBands;
+  bands.x = min(uBands.x * mix(1.0, uGrazeGain.x, graze), uBands.y * 0.92);
+  bands.y = min(uBands.y * mix(1.0, uGrazeGain.y, graze), uBands.z * 0.95);
+
   float mGlow = wbInside(uBands.z, a, 0.35);
-  float mBody = wbInside(uBands.y, a, 0.35);
-  float mCore = wbInside(uBands.x, a, 0.35);
+  float mBody = wbInside(bands.y, a, 0.35);
+  float mCore = wbInside(bands.x, a, 0.35);
   float mEdge = 1.0 - smoothstep(uBands.z, uBands.w, a);
 
   // Chevrons. Skewing the phase by |side| turns a band across the ribbon into a
@@ -285,11 +368,21 @@ void main() {
   // the old ink separator did.
   vec3 line = uLine * 0.62;
   line = mix(line, uLine * 0.84, mGlow);
-  line = mix(line, uLine * 1.12, mBody);
+  // The body is where the emissive lift goes, and it goes there rather than on
+  // the core for a reason worth stating: uHot is a near-white mint and uLine is
+  // the actual green, so brightening the core pushes the filament past white and
+  // the line stops separating from foam by hue - which was the whole argument
+  // for green over the visor cyan in the first place. Scaling uLine is a scalar
+  // multiply, so the hue is exactly preserved while the luma goes from 0.85 to
+  // 1.29 - across the composite's 0.85 bright-pass threshold, so the glow the
+  // line picks up is a *green* glow.
+  line = mix(line, uLine * (1.12 + uGrazeGain.z * graze), mBody);
   line = mix(line, uHot * 1.10, arrow * mBody);
   line = mix(line, uLine * 0.58, chevRule * mBody * 0.7);
   // The core filament runs unbroken through the arrows, so the line still reads
   // as one continuous path at a glance rather than as a row of separate marks.
+  // It stays at 1.25 from every camera: it is already the palest thing in the
+  // ribbon, and the only place it has left to go is white.
   line = mix(line, uHot * 1.25, mCore);
 
   // The line flares where the water is pinching itself together, i.e. exactly on
@@ -297,6 +390,20 @@ void main() {
   // brightens on the same water that goes white - the two read as one surface.
   float crest = 1.0 - smoothstep(0.93, 1.01, vJac);
   line += uHot * crest * 0.14 * mBody;
+
+  // A one-pixel outer contour, in a deep shade of the line's OWN green.
+  //
+  // Two things make this safe, and both are load-bearing, because a dark band on
+  // this ribbon is a failure the project has already had: an ink separator here
+  // once stained every whitecap it crossed grey. First, the colour is uLine
+  // darkened - a dark *green*, which over foam reads as the line's own shadow
+  // rather than as dirt. Second, it is switched off exactly where the foam is:
+  // crest is the Jacobian pinch, the same field the ocean's whitecaps are
+  // thresholded from, so on water that is about to go white the contour is gone
+  // before it can stain it. It is also grazing-weighted, so it does not exist at
+  // all in the view where the ribbon is already legible.
+  float contour = clamp(wbInside(mix(uBands.z, uBands.w, 0.45), a, 0.35) - mGlow, 0.0, 1.0);
+  line = mix(line, uLine * 0.34, contour * graze * 0.60 * (1.0 - crest));
 
   // --- the ribbon is lit by the sea it lies on -------------------------------
   // The vertices already ride the Gerstner surface, so the ribbon has the right
@@ -336,6 +443,10 @@ void main() {
   // narrows to its core, which is the two-pixel scratch it used to be from
   // altitude.
   float lineAlpha = mEdge * (0.62 + 0.38 * mBody) * (0.90 + 0.22 * arrow * mBody);
+  // Edge-on the ribbon has far fewer pixels to say anything with, so each one is
+  // allowed to say it harder. Clamped, and zero from altitude, so the peak the
+  // aerial view sees is unchanged.
+  lineAlpha = min(lineAlpha * mix(1.0, uGrazeGain.w, graze), 1.0);
   float alpha = mix(lineAlpha, mStrip, uMode) * uOpacity;
 
   // Fade out well before the fog does. A 2.7 km ribbon drawn all the way to the

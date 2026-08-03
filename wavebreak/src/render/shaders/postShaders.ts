@@ -183,6 +183,13 @@ uniform vec2  uTexel;            // 1 / full-res size
 uniform float uEdgeRadius;       // Sobel tap radius in texels, resolution-scaled
 uniform float uDepthThreshold;
 uniform float uNormalThreshold;
+/**
+ * The same two thresholds again, tightened, for surfaces that have opted all the
+ * way in to the ink. See the 'hard' term below - the pair a pixel actually gets
+ * is interpolated between these and the two above by how inked its surface is.
+ */
+uniform float uDepthThresholdHard;
+uniform float uNormalThresholdHard;
 uniform float uEdgeStrength;     // 0 disables the whole edge block
 
 uniform vec3  uInk;
@@ -221,6 +228,54 @@ void main() {
     vec4 g7 = texture(uNormalDepth, vUv + vec2( 0.0, -o.y));
     vec4 g8 = texture(uNormalDepth, vUv + vec2( o.x, -o.y));
 
+    // --- mask -------------------------------------------------------------
+    // Computed FIRST, because it now decides the thresholds and not just the
+    // final line strength.
+    //
+    // Centre mask is the surface's own opt-out. The neighbourhood minimum is
+    // the anti-double-up: a texel sitting right against an inverted-hull shell
+    // (mask 0) is by definition one texel from a line that already exists, and
+    // drawing a second one there is exactly the fattened, muddy silhouette the
+    // two-system split is meant to avoid.
+    float minMask = min(
+      min(min(g0.w, g1.w), min(g2.w, g3.w)),
+      min(min(g5.w, g6.w), min(g7.w, g8.w))
+    );
+    float mask = g4.w * minMask;
+
+    // --- how inked is this surface? ----------------------------------------
+    // One threshold for the whole frame cannot serve both jobs. The interior
+    // pass was measurably starved: at uNormalThreshold = 0.20 (a 37-degree
+    // crease) a 12-sided gate pylon's 30-degree facets give nDiff = 0.134, so
+    // nEdge = 0.67 - under 1.0 - and all that survived was the anti-aliasing
+    // tail, ~0.24 of a line. Hull panel breaks are shallower still and drew
+    // nothing at all. But simply lowering the threshold globally scribbles on
+    // the ocean and doubles every silhouette, which is why it was set high.
+    //
+    // So the sensitivity is gated on the G-buffer's own edgeMask, and the gate
+    // is chosen so that both failure modes are unreachable BY CONSTRUCTION
+    // rather than by taste:
+    //
+    //   * The ocean cannot scribble. Ocean.ts sets uEdgeMask = (0.12, 0.20) and
+    //     water.ts evaluates 0.12 + 0.20 * crest before multiplying that DOWN by
+    //     foam, fog and near-fade, so water's edgeMask has a hard ceiling of
+    //     0.32. smoothstep(0.45, 0.85, x) is identically zero for x <= 0.45, so
+    //     every water pixel takes the unchanged, conservative thresholds.
+    //   * No silhouette can double. The ink shells write edgeMask = 0, so within
+    //     one texel of any shell minMask = 0, hence mask = 0, hence hard = 0
+    //     AND line = 0. The boost is unreachable next to a silhouette.
+    //   * Round hulls still will not scribble. At 8 m through a 58-degree frame
+    //     one pixel is ~6.2 mm of surface, so across the 3.2-texel span between
+    //     opposite taps a 1 m-radius hull turns its normal ~1.15 degrees:
+    //     nDiff ~ 2e-4 against a 0.060 threshold, ~300x of margin.
+    //
+    // What is left is exactly the wanted set: hull 1.0, metal 0.9, cloth 0.8 all
+    // land at hard ~1.0, skin 0.55 gets a deliberately light 0.22, and the race
+    // line's glow at 0.25 gets nothing.
+    float hard = smoothstep(0.45, 0.85, mask);
+    float nT = mix(uNormalThreshold, uNormalThresholdHard, hard);
+    float dT = mix(uDepthThreshold,  uDepthThresholdHard,  hard);
+
     // --- depth ------------------------------------------------------------
     float sx = (g0.z + 2.0 * g3.z + g6.z) - (g2.z + 2.0 * g5.z + g8.z);
     float sy = (g0.z + 2.0 * g1.z + g2.z) - (g6.z + 2.0 * g7.z + g8.z);
@@ -240,7 +295,7 @@ void main() {
     // Between those the perspective term starts to dominate the real geometry.
     float graze = smoothstep(0.17, 0.42, ndv);
 
-    float dEdge = (dGrad / uDepthThreshold) * graze;
+    float dEdge = (dGrad / dT) * graze;
 
     // --- normals ----------------------------------------------------------
     // Opposite pairs: horizontal, vertical and both diagonals.
@@ -252,19 +307,7 @@ void main() {
       max(1.0 - dot(n0, n8), 1.0 - dot(n2, n6)),
       max(1.0 - dot(n1, n7), 1.0 - dot(n3, n5))
     );
-    float nEdge = nDiff / uNormalThreshold;
-
-    // --- mask -------------------------------------------------------------
-    // Centre mask is the surface's own opt-out. The neighbourhood minimum is
-    // the anti-double-up: a texel sitting right against an inverted-hull shell
-    // (mask 0) is by definition one texel from a line that already exists, and
-    // drawing a second one there is exactly the fattened, muddy silhouette the
-    // two-system split is meant to avoid.
-    float minMask = min(
-      min(min(g0.w, g1.w), min(g2.w, g3.w)),
-      min(min(g5.w, g6.w), min(g7.w, g8.w))
-    );
-    float mask = g4.w * minMask;
+    float nEdge = nDiff / nT;
 
     // --- resolve ----------------------------------------------------------
     // Both signals are normalised so 1.0 *is* the threshold; the soft edge is

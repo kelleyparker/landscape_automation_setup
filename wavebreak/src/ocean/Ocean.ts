@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { PALETTE, SUN_DIR, AMBIENT } from '../core/Palette';
-import { TEX } from '../core/Textures';
+import { TEX, makeRampTexture } from '../core/Textures';
 import { WAVES, MAX_WAVE_HEIGHT } from './waveConfig';
 import { buildWaterShaders, WATER_MAX_INTERACTORS } from './shaders/water';
 
@@ -82,8 +82,8 @@ const RING_GROWTH = 1.018;
  * for the entire far field at two rings per wavelength, which is exactly where
  * the drawn surface came apart.
  */
-const MID_WAVE_COUNT = 4;
-const FAR_WAVE_COUNT = 2;
+export const MID_WAVE_COUNT = 4;
+export const FAR_WAVE_COUNT = 2;
 
 /**
  * Where the chop fade runs. It starts well beyond the boats (the CPU buoyancy
@@ -92,8 +92,8 @@ const FAR_WAVE_COUNT = 2;
  * surface loses the two chop layers - 0.21 m of 2.9 m - as a gentle smoothing
  * rather than at a visible ring.
  */
-const CHOP_FADE_START = 100;
-const CHOP_FADE_END = 400;
+export const CHOP_FADE_START = 100;
+export const CHOP_FADE_END = 400;
 
 /**
  * The second stage, over an even longer 660 m so it is even less findable, and
@@ -101,8 +101,8 @@ const CHOP_FADE_END = 400;
  * plateau between them, and a plateau bounded by two transitions is a ring by
  * another name.
  */
-const SWELL_FADE_START = 340;
-const SWELL_FADE_END = 1000;
+export const SWELL_FADE_START = 340;
+export const SWELL_FADE_END = 1000;
 
 // -------------------------------------------------------------- look ---------
 
@@ -148,6 +148,14 @@ const NOISE_TILE = 14.0;
  * grain - and they stay several pixels wide out to the fog plane.
  */
 const HAZE_NOISE_TILE = 260.0;
+/**
+ * A second, coarser octave for the same edge. 620 m is not harmonic with 260 m,
+ * so the two never line up into a repeat, and its features are ~155 m across -
+ * still several pixels wide at the fog plane. One octave is a sine; two is a
+ * brush stroke, and a brush stroke is what makes the last two haze edges read as
+ * two interlocking painted regions rather than as one fill with a wavy border.
+ */
+const HAZE_NOISE_TILE_2 = 620.0;
 /** Sparkle tile. Sparse stars, so the repeat is not readable. */
 const SPARKLE_TILE = 26.0;
 /**
@@ -157,6 +165,70 @@ const SPARKLE_TILE = 26.0;
  * the very crawl the sparkle pass is meant to replace. Coarse facet, fine star.
  */
 const SPARKLE_FACET_TILE = 7.0;
+
+// ------------------------------------------------------------ water ramp -----
+
+/**
+ * The ocean's own lighting ramp, and the reason it is not `TEX.rampWater`.
+ *
+ * Two things in the shared water ramp were rotating the sea off the palette,
+ * both measurable rather than matters of taste:
+ *
+ *  1. **Wash.** `wbCelDiffuse`'s washed path is `bandLight * (0.10 + 0.90*alum)`.
+ *     Water's albedo luma is about 0.03, so the constant 0.10 dominates and the
+ *     washed value is a near-neutral grey. At the old 10% it lifted the abyss's
+ *     linear red from 0.0065 to 0.0272 - a 4x lift on the one channel whose
+ *     smallness *is* deep blue - and the darkest fifth of the sea lost a third
+ *     of its chroma. The wash exists to rescue hulls whose albedo has no
+ *     headroom left; the ocean authors five band colours off wave height and has
+ *     no such problem, so 2% is all it needs to keep the darks off the gamut
+ *     edge.
+ *
+ *  2. **A cool shadow step.** The old shadow light (0.20, 0.25, 0.42) has
+ *     B/G = 1.68. On an albedo that is already blue-dominant (waterDeep's B/G is
+ *     4.2) that multiplies out to 7.1 and rotates the band from hue 214 to hue
+ *     223 - which is `ink`'s hue exactly. "Cool the shadows" is right for a warm
+ *     hull and wrong here: the sea's own colour *is* the cool end of the
+ *     palette, so cooling it further can only walk it into the outline colour.
+ *     The steps below are near-neutral with a whisper of warmth, sized to cancel
+ *     the ambient term (which is bluer than waterDeep) rather than to add to it.
+ *     The ink line goes on carrying the cool dark, which is where this project
+ *     puts it everywhere else.
+ *
+ * Predicted, simulated through the exact linear chain including the composer's
+ * 1.06 saturation lift, across every band x every step:
+ *
+ *   deep family hue   217.3 .. 223.0  ->  214.0 .. 217.4   (waterDeep = 213.8)
+ *   deep family sat    0.67 .. 0.91   ->   0.87 .. 0.94    (waterDeep = 0.92)
+ *
+ * These are light *multipliers* - the form `RampBand.light` is documented as -
+ * not colours, so no hex literal is introduced. Cost: one 128x1 RGBA
+ * DataTexture, 512 bytes. `TEX.rampWater` is left in place for any other
+ * consumer; today the ocean was its only one.
+ */
+const WATER_RAMP = makeRampTexture([
+  { upto: 0.46, light: new THREE.Color(0.440, 0.400, 0.368), wash: 0.02 },
+  { upto: 0.74, light: new THREE.Color(0.720, 0.698, 0.686), wash: 0.02 },
+  { upto: 1.01, light: new THREE.Color(1.080, 1.020, 0.960), wash: 0.02 },
+]);
+
+/**
+ * The water's own ambient. `AMBIENT` is a scene-wide sky bounce at hue 218, and
+ * adding it un-tinted to an albedo at hue 214 pushes the result the same way the
+ * old shadow step did. Pulling a fifth of it toward `waterDeep` keeps it a sky
+ * bounce - it is still much lighter and much less saturated than the water - and
+ * stops the fill drifting toward ink at exactly the values where the drift shows.
+ */
+const WATER_AMBIENT = AMBIENT.clone().lerp(PALETTE.waterDeep, 0.20);
+
+/**
+ * Legibility floor for the darkest band. `CEL_LIGHTING` declares `uShadowFloor`
+ * and the ocean never supplied it, so GL left it at zero and the water had no
+ * guard at all. It is deliberately quiet - under normal sun nothing in the sea
+ * is dark enough to trip it - and it is `waterMid` rather than a neutral, so if
+ * it ever does fire it lifts toward the sea's own hue instead of greying it.
+ */
+const WATER_SHADOW_FLOOR = PALETTE.waterMid.clone().multiplyScalar(0.10);
 
 /**
  * The single distance ramp every drawn mark on the water fades along, in metres
@@ -226,17 +298,37 @@ const HAZE_EDGES = new THREE.Vector4(0.24, 0.47, 0.68, 0.87);
  * it. There is no path from here to a warm hue: the darkest input is bluer than
  * the lightest, the water ramp's shadow step is cool, and both fresnel targets
  * are sky colours.
+ *
+ * The pull is 0.26 and not the 0.42 it was. `ink` sits at hue 224 against
+ * `waterDeep`'s 214, so 42% of it pre-rotated the band four degrees toward the
+ * outline colour before a single light hit it, and the ramp's cool shadow step
+ * then carried it the rest of the way. At 0.26 the band still separates from
+ * `BAND_DEEP` by value - simulated, 0.29 against 0.33 at the shadow step, the
+ * same gap as before - without spending any of the separation budget on hue.
  */
-const BAND_ABYSS = PALETTE.waterDeep.clone().lerp(PALETTE.ink, 0.42);
+const BAND_ABYSS = PALETTE.waterDeep.clone().lerp(PALETTE.ink, 0.26);
 const BAND_DEEP = PALETTE.waterDeep.clone();
 /** Subsurface note in the trough floor: the shallow cyan pulled into the navy. */
 const DEEP_TINT = PALETTE.waterDeep.clone().lerp(PALETTE.waterShallow, 0.34);
 /**
- * The hot inner lip of a backlit crest. Pulling the jade a third of the way to
- * the sun's glow is the only warm note anywhere in the water, and the whole
- * palette was on one blue-cyan axis without it.
+ * The hot inner lip of a backlit crest.
+ *
+ * This used to be the jade pulled a third of the way toward `sunGlow`, on the
+ * argument that the water needed one warm note. In *linear* space that lerp is
+ * not a warm note, it is a channel inversion: sunGlow's red is 1.0 and the
+ * jade's is 0.072, so 34% of it drives red to 0.39 and the result lands at
+ * sRGB (164, 231, 185) - hue 139, saturation 0.29. A pale sage green. Over a
+ * stroke a few pixels wide nobody would name it; over the plates the old gate
+ * produced it read as a sandbar lying on the sea, which is what `lowwater`
+ * showed at 128k contiguous pixels.
+ *
+ * Toward `foam` instead it is sRGB (162, 246, 233), hue 171 - the same jade,
+ * one value step up and a little paler, which is what light exiting a thin
+ * crest actually looks like. The hue separation the warm pull was buying is
+ * already there: at 171 the jade is the palette's only break from the 186-214
+ * blue-cyan axis the rest of the sea lives on.
  */
-const TRANSLUCENT_HOT = PALETTE.waterTranslucent.clone().lerp(PALETTE.sunGlow, 0.34);
+const TRANSLUCENT_HOT = PALETTE.waterTranslucent.clone().lerp(PALETTE.foam, 0.40);
 /** Glint colour: foam with a warm core, so the sun track is not just white. */
 const SPARKLE_COLOR = PALETTE.foam.clone().lerp(PALETTE.sunCore, 0.55);
 /** Ink for the foam contour. The scene ink, lifted so it reads as a line not a hole. */
@@ -353,13 +445,22 @@ export class Ocean {
 
     this.uniforms = {
       // --- shared cel lighting block (celChunks CEL_LIGHTING) ----------------
-      uRamp: { value: TEX.rampWater },
+      uRamp: { value: WATER_RAMP },
       uSunDir: { value: SUN_DIR.clone() },
       uSunColor: { value: new THREE.Color(1.0, 0.985, 0.94) },
-      uAmbient: { value: AMBIENT.clone() },
+      uAmbient: { value: WATER_AMBIENT.clone() },
+      // Declared by CEL_LIGHTING and previously never supplied by this material,
+      // so GL left all four at zero. uShadowFloor is the one that matters (see
+      // WATER_SHADOW_FLOOR); uBandBias belongs to symmetric standing figures and
+      // is correctly 0 here, and the two rim numbers are dead while
+      // uRimStrength is 0 but are supplied so the block is complete.
+      uShadowFloor: { value: WATER_SHADOW_FLOOR.clone() },
+      uBandBias: { value: 0.0 },
       uRimColor: { value: PALETTE.waterCrest.clone() },
       uRimPower: { value: 2.6 },
       uRimStrength: { value: 0.0 },
+      uRimThreshold: { value: 0.55 },
+      uRimWidth: { value: 0.18 },
       uSpecColor: { value: PALETTE.foam.clone() },
       // A narrow, hard highlight: at power 110 the outer step is ~9 degrees wide
       // and the hot core ~6, which reads as a drawn glint rather than a sheen.
@@ -415,8 +516,23 @@ export class Ocean {
       // exactly the sun-facing lip of a crest and not the shadow-side face.
       uTransFacing: { value: new THREE.Vector2(0.70, 0.90) },
       uTransThin: { value: new THREE.Vector2(0.52, 0.80) },
-      uTransCut: { value: new THREE.Vector2(0.27, 0.45) },
-      uTransStrength: { value: new THREE.Vector2(0.95, 0.85) },
+      /**
+       * The gate this term was missing: the surface has to actually be a crest.
+       *
+       * x/y is a window on the same Jacobian pinch the foam keys off. The lower
+       * edge is where a lip starts to exist at all; z/w rolls the jade back off
+       * again at the very top of the pinch, where the whitecap takes over, so
+       * the jade sits as a band *under* the white rather than fighting it for
+       * the same pixels. That is also where subsurface light actually exits a
+       * wave - the foam is opaque, the shoulder below it is not.
+       */
+      uTransPinch: { value: new THREE.Vector4(0.14, 0.46, 0.78, 1.00) },
+      // The cuts are unchanged in spirit but the term feeding them is now a
+      // product of four gates rather than three, so the jade band sits a little
+      // lower and the hot lip a good deal further inside it: the hot colour is
+      // meant to be the minority mark, and at 0.45 it was most of the stroke.
+      uTransCut: { value: new THREE.Vector2(0.24, 0.52) },
+      uTransStrength: { value: new THREE.Vector2(0.90, 0.55) },
       uTransFade: { value: new THREE.Vector2(160, 620) },
 
       // --- crest strokes ----------------------------------------------------
@@ -493,11 +609,25 @@ export class Ocean {
       uHazeC: { value: PALETTE.waterMid.clone() },
       uFogColor: { value: PALETTE.skyHorizon.clone() },
       uHazeEdges: { value: HAZE_EDGES.clone() },
-      // Wider than it was, because the field it rides is now coarse enough to
-      // carry it: a 65 m wobble at 0.17 reads as a painted edge, where the same
-      // number on a half-metre field read as grain.
-      uHazeJitter: { value: 0.17 },
+      /**
+       * Wider than it was, and it now grows with the fog rather than shrinking.
+       *
+       * A row-mean scan of the reference `aerial` frame found 68 consecutive
+       * rows - about 420 to 770 m out, and 60% of every pixel in the far band -
+       * sitting at one single colour, row-to-row delta 0 to 2. That far sea has
+       * nothing in it: from a high camera `fwidth(h01)` trips `hFlat`, the ramp
+       * folds to `uBandMid`, the vertex LOD has already taken the pinch so no
+       * crest stroke or foam is generated, and `uHazeA` covers the result. The
+       * only mark left with any business being there is the haze edge itself,
+       * and the old `(1.0 - fog * 0.4)` was quietly turning it *down* over
+       * exactly that stretch.
+       *
+       * See the jitter block in water.ts for the fog scaling and the second,
+       * coarser octave that turns the edge from a sine into a brush stroke.
+       */
+      uHazeJitter: { value: 0.26 },
       uHazeNoiseScale: { value: 1 / HAZE_NOISE_TILE },
+      uHazeNoiseScale2: { value: 1 / HAZE_NOISE_TILE_2 },
       uFogCurve: { value: HAZE_CURVE },
       // y is overwritten from the scene fog every frame - see syncFog().
       uFogRange: { value: new THREE.Vector2(HAZE_NEAR, 1750) },

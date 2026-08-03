@@ -268,6 +268,8 @@ uniform vec2  uTransStrength;
 uniform vec2  uTransFacing;
 /** h01 window that counts as "the water here is thin". */
 uniform vec2  uTransThin;
+/** Jacobian-pinch window: xy opens the lip, zw rolls it off under the whitecap. */
+uniform vec4  uTransPinch;
 uniform vec2  uTransFade;
 
 // --- crest strokes ---------------------------------------------------------
@@ -352,6 +354,8 @@ uniform vec4  uHazeEdges;
 uniform float uHazeJitter;
 /** uv per metre for the haze wobble. Far coarser than the band noise - see main(). */
 uniform float uHazeNoiseScale;
+/** Second, coarser octave of the same wobble. See the jitter block in main(). */
+uniform float uHazeNoiseScale2;
 uniform float uFogCurve;
 uniform vec2  uFogRange;
 /** x = open-water interior line strength, y = extra allowed on the big crests. */
@@ -477,6 +481,16 @@ void main() {
   float hazeN = texture(uNoiseTex, hazeUv).r;
   float hazeRes = wbResolve(hazeUv, 0.25);
 
+  // ...and a second octave more than twice as coarse again, on a tile that is
+  // not harmonic with the first. One octave gives an edge that meanders like a
+  // sine; two give it the low-frequency wander a brush has, which is what turns
+  // the last two haze bands from "one fill with a wavy border" into two regions
+  // that interlock. It reads its own channel of the same fetchable field, so the
+  // whole cost is one texture tap - nine in this shader instead of eight.
+  vec2 hazeUv2 = (p + uFoamScrollB) * uHazeNoiseScale2;
+  float hazeN2 = texture(uNoiseTex, hazeUv2).g;
+  float hazeRes2 = wbResolve(hazeUv2, 0.25);
+
   // --------------------------------------------------------- height bands ----
   // Five flat colours keyed to the world height of the displaced surface. The
   // noise nudge is small - well under a band - but it is what stops the edges
@@ -541,37 +555,64 @@ void main() {
   col = mix(col, uDeepTint,
             wbStep(uDeepTintCut, troughFloor, 0.003, 0.4) * uDeepTintStrength * near01);
 
+  // ----------------------------------------------------------- crest field ---
+  // The Jacobian is the honest crest signal: it is < 1 exactly where the Gerstner
+  // map is compressing the surface horizontally, which is the pinch at the top of
+  // a wave and nowhere else. It is computed here, above everything that keys off
+  // it, because the translucency below needs it too - the jade and the whitecap
+  // are two marks on one surface, and they have to be driven by the same field or
+  // they are two surfaces.
+  float crest = 1.0 - smoothstep(uFoamJac.x, uFoamJac.y, vJac);
+  crest *= smoothstep(uFoamHeightGate.x, uFoamHeightGate.y, h01);
+
   // --------------------------------------------------- backlit translucency ---
   // Light entering the sun-facing back of a thin crest and coming out toward the
-  // eye. The gate is geometric, so it fires on any crest oriented that way rather
-  // than only when the camera happens to face the sun: the face must be turned
-  // further into the sun than flat water is (which is what makes it land on one
-  // side of a crest and not the other), and it must be near the top of a wave
-  // where the water is thin.
+  // eye. Every gate is geometric, so it fires on any crest oriented that way
+  // rather than only when the camera happens to face the sun: the face must be
+  // turned further into the sun than flat water is (which is what makes it land
+  // on one side of a crest and not the other), it must be near the top of a wave
+  // where the water is thin, and - new, and the whole fix - the surface there
+  // must actually be *pinching*.
   //
-  // The previous build multiplied the whole term by a view-into-sun factor that
-  // floors at 0.30 - below the 0.33 cut - so on any camera not pointed at the sun
-  // the band was arithmetically unreachable and the crest lips shaded identically
-  // on both faces. Looking into the sun now *strengthens* the term rather than
-  // being a precondition for it, and it is thresholded into its own two hard
-  // bands: jade, then a hotter lip inside it.
+  // What was here instead was lipward = 1 - smoothstep(0.12, 0.72, ndv), and
+  // that is a camera term wearing geometry's clothes. At a low camera every
+  // distant fragment is grazing, so it saturated to 1 across the entire far field
+  // and the gate degenerated into "water that is high and tilted sunward" - which
+  // is a swell shoulder, i.e. an area. Measured on the reference frames it drew a
+  // single contiguous 128k-pixel plate in lowwater and 58k in chase, reading
+  // as a sandbar. From a high camera the same term collapsed to its 0.52 floor,
+  // which is why aerial had almost none of it. One term, both failures,
+  // opposite directions.
+  //
+  // The Jacobian has no such bias: it is a property of the water. Gated on it the
+  // jade lands on the same crests that go white, rolls off again under the
+  // whitecap so it reads as the lip below the foam, and appears from every
+  // camera because the pinch does.
   float backLook = clamp(-dot(V, L), 0.0, 1.0) * 0.5 + 0.5;
-  float lipward = 1.0 - smoothstep(0.12, 0.72, ndv);
+  float pinch = smoothstep(uTransPinch.x, uTransPinch.y, crest)
+              * (1.0 - 0.85 * smoothstep(uTransPinch.z, uTransPinch.w, crest));
   float thin = smoothstep(uTransFacing.x, uTransFacing.y, ndl)
              * smoothstep(uTransThin.x, uTransThin.y, h01)
              * (1.0 - smoothstep(uTransFade.x, uTransFade.y, vViewDepth));
-  float trans = thin * (0.52 + 0.48 * lipward) * (0.62 + 0.38 * backLook);
-  col = mix(col, uTranslucent,    wbStep(uTransCut.x, trans, 0.002, 0.3) * uTransStrength.x);
-  col = mix(col, uTranslucentHot, wbStep(uTransCut.y, trans, 0.002, 0.3) * uTransStrength.y);
-
-  // ------------------------------------------------------------------ foam ---
-  // The Jacobian is the honest crest signal: it is < 1 exactly where the Gerstner
-  // map is compressing the surface horizontally, which is the pinch at the top of
-  // a wave and nowhere else. Thresholding it alone would give a smooth ridge, so
-  // the foam texture is added *before* the threshold - the shapes and holes then
-  // come out of the drawn alphabet rather than out of a falloff.
-  float crest = 1.0 - smoothstep(uFoamJac.x, uFoamJac.y, vJac);
-  crest *= smoothstep(uFoamHeightGate.x, uFoamHeightGate.y, h01);
+  // ...and the same guard the colour bands use. hFlat is 1 where this one pixel
+  // spans a quarter of the whole height range, i.e. where a complete swell has
+  // been foreshortened into a couple of screen rows. A "thin crest lip" drawn
+  // there is not a lip, it is every crest between here and the horizon summed
+  // into one horizontal band - which is precisely how a stroke turns back into a
+  // plate at a deck-height camera. Folding the jade out on the same signal that
+  // folds the bands out keeps the two marks agreeing about what is resolvable.
+  float trans = thin * pinch * (0.72 + 0.28 * backLook) * (1.0 - hFlat);
+  // Both cuts are held to a one-pixel step. At the old 0.30 ceiling fwidth
+  // saturated the clamp at any real range and the "hard cut" became a 0.6-wide
+  // ramp - a soft plate, not a drawn band, which is the second half of why this
+  // read as terrain. Contrast falls with distance on the same curve every other
+  // mark in this shader uses, rather than the mark itself surviving to the
+  // horizon at full strength.
+  float transFar = 1.0 - 0.75 * far01;
+  col = mix(col, uTranslucent,
+            wbStep(uTransCut.x, trans, 0.002, 0.07) * uTransStrength.x * transFar);
+  col = mix(col, uTranslucentHot,
+            wbStep(uTransCut.y, trans, 0.002, 0.07) * uTransStrength.y * transFar);
 
   // ------------------------------------------------------- crest strokes -----
   // The tier the ramp was missing. Held to a *lower* bar than the foam and
@@ -585,6 +626,11 @@ void main() {
   col = mix(col, uStrokeColor,
             strokeMask * uStrokeStrength * (1.0 - 0.85 * far01) * mix(0.35, 1.0, foamRes));
 
+  // ------------------------------------------------------------------ foam ---
+  // Thresholding the crest field alone would give a smooth ridge, so the foam
+  // texture is added *before* the threshold - the shapes and holes then come out
+  // of the drawn alphabet rather than out of a falloff.
+  //
   // The far-field bar goes *up*, not down. The previous build lowered it past the
   // chop fade on the theory that the mipped tile needed help; what it actually did
   // was detonate the foam into big flat plates just beyond the LOD ring and then
@@ -748,7 +794,18 @@ void main() {
   // stop that was drawing the line in the first place.
   float fogT = clamp((vViewDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1e-3), 0.0, 1.0);
   float fog = pow(fogT, uFogCurve);
-  float fq = fog + (hazeN - 0.5) * uHazeJitter * hazeRes * (1.0 - fog * 0.4);
+  // The wobble scales *up* with the fog, not down.
+  //
+  // Two octaves summed, each retired by its own wbResolve so neither dithers
+  // where it finally goes sub-pixel. The old (1.0 - fog * 0.4) had the sign of
+  // the problem backwards: the near edges it protected are drawn across water
+  // that still has bands, strokes and foam in it, while the last two edges are
+  // the only marks left anywhere in the far field - and those were the ones being
+  // damped. Scaled the other way, the near edges keep roughly the wobble they had
+  // and the far ones meander by a couple of hundred metres of apparent depth, so
+  // the flat band becomes two interlocking painted regions instead of one fill.
+  float jit = (hazeN - 0.5) * hazeRes + (hazeN2 - 0.5) * 1.25 * hazeRes2;
+  float fq = fog + jit * uHazeJitter * (0.55 + 0.85 * fog);
   col = mix(col, uHazeA,    wbStep(uHazeEdges.x, fq, 0.0015, 0.9));
   col = mix(col, uHazeB,    wbStep(uHazeEdges.y, fq, 0.0015, 0.9));
   col = mix(col, uHazeC,    wbStep(uHazeEdges.z, fq, 0.0015, 0.9));

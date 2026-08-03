@@ -124,6 +124,28 @@ const WAKE_LIFT = 0.085;
 const WAKE_LIP_SAMPLE_HW = 0.85;
 
 /**
+ * Vertices across the ribbon, per spine point.
+ *
+ * It was two. A fully spread segment is `hw0 x WAKE_SPREAD` wide - up to about
+ * 10.8 m across - and with only the two lips as vertices that whole span was a
+ * single flat quad. The spine's own `sampleSurface` height, the one point on
+ * the segment the boat actually drove over, was computed every frame and then
+ * thrown away for wide segments, so the ribbon could not bend across its own
+ * width at all: it drew as a flat plank laid over the swell no matter how well
+ * the two lips were seated.
+ *
+ * Five lanes at -1, -1/2, 0, +1/2, +1 fix that with no extra ocean sampling
+ * whatsoever. The centre lane is the spine sample that was already being taken;
+ * the two quarter lanes are the parabola through left, centre and right, which
+ * is the correct second-order fit and the best that can be had from three
+ * known heights. Cost is 4 quads per segment instead of 1: 1048 triangles per
+ * ribbon and 4192 across the four, up from 1048 total - **+3144 triangles**,
+ * about 1.4% of the 218k frame budget, with zero extra draw calls and zero
+ * extra CPU surface samples.
+ */
+const WAKE_LANES = 5;
+
+/**
  * Foam drift, in periods/second, for the two octaves of the analytic blob field.
  *
  * These are deliberately slow. The mask is keyed off absolute world metres -
@@ -183,6 +205,53 @@ const SPRAY_CONE = 0.42;
  * breaks *against* the hull sides instead of over the rider.
  */
 const SPRAY_SPAWN_PUSH = 0.34;
+
+/**
+ * The rooster tail.
+ *
+ * `emitSpray` is only ever called by BoatPhysics on a landing impact, on a wet
+ * bow above 11 m/s, or on a slip angle past 4.5 - and none of those hold while
+ * a boat is simply driving fast in a straight line. Measured on the delivered
+ * frames, that meant there was not one visible droplet anywhere in the chase,
+ * wake or low-water captures: the game's spray system was, in every ordinary
+ * racing moment, invisible. A planing hull throwing no water at 90 km/h is the
+ * single loudest wrongness in those frames.
+ *
+ * BoatPhysics is not this file's to edit, so the fix lives here: `emitWake` is
+ * called every frame for every boat and already carries position, heading,
+ * beam and foam strength, and the frame-to-frame delta of that position is the
+ * boat's speed. Spawning is driven by DISTANCE TRAVELLED, not by frame count,
+ * for the same reason the ribbon's spine points are - otherwise the density of
+ * the tail would change with the frame rate.
+ *
+ * Budget: at 2.2 droplets per metre and 25 m/s a planing boat spawns ~55/s, and
+ * a droplet thrown up at 3-5.5 m/s under the arcade gravity is back in the water
+ * in a third of a second, so about 16 are live per boat and 65 across the pack -
+ * a ninth of the 600 pool, with ROOSTER_POOL_CAP guaranteeing the impact and
+ * drift bursts can still always allocate. The rate is a triangle budget as much
+ * as an art choice: the droplet blob is 80 triangles, so 65 live droplets is
+ * 5.2k triangles and the rate is what keeps that bounded.
+ */
+const ROOSTER_PER_M = 2.2;
+/** No rooster below this - a boat off the plane pushes water, it does not throw it. */
+const ROOSTER_MIN_SPEED = 9.0;
+/** Speed at which the tail is at full rate. */
+const ROOSTER_FULL_SPEED = 20.0;
+/** Foam strength below which there is no tail at all. */
+const ROOSTER_MIN_STRENGTH = 0.30;
+/** Never let the self-driven tail take more than this much of the pool. */
+const ROOSTER_POOL_CAP = 420;
+/** Most droplets a single frame's worth of travel may spawn, per boat. */
+const ROOSTER_MAX_STEP = 6;
+/**
+ * Half-extents, in metres. 2.5-6.5 cm is a droplet 5-13 cm across, which at the
+ * six to ten metres a chase camera sits behind the transom is 10-25 px - large
+ * enough to read as a drawn shape with a silhouette, small enough that thirty
+ * of them are a spray and not a cloud. The impact bursts keep their own,
+ * smaller, squared distribution.
+ */
+const ROOSTER_SIZE_MIN = 0.028;
+const ROOSTER_SIZE_SPAN = 0.048;
 
 /**
  * Water-height cache policy for airborne droplets.
@@ -290,8 +359,9 @@ function angleDelta(a: number, b: number): number {
  * segments of a lumpy radius is a polygon, not a curve.
  *
  * This is a teardrop instead: round head, tapered tail, pointed along local +Y,
- * at 20 segments so the head silhouette resolves as a curve at any size the
- * particle can reach. The vertex shader aims local +Y down the reverse of the
+ * at 16 segments so the head silhouette resolves as a curve at any size the
+ * particle can reach - a droplet peaks at about 25 px across, which is 5 px per
+ * facet, and every triangle here is multiplied by the live particle count. The vertex shader aims local +Y down the reverse of the
  * droplet's velocity, so the tail always streams behind - a comma, the way
  * spray is drawn - and the small asymmetry term stops eight droplets at eight
  * angles reading as one stamp repeated.
@@ -300,7 +370,7 @@ function angleDelta(a: number, b: number): number {
  * constants R_CORE / R_BODY in the fragment shader.
  */
 function makeSprayBlob(): THREE.BufferGeometry {
-  const SEGMENTS = 20;
+  const SEGMENTS = 16;
   // Ring radii, and therefore the tone boundaries. The contour band is the outer
   // 14% of the radius - because these rings are concentric, a wide concentric
   // band reads as a vignette where what is wanted is a drawn edge. On a droplet
@@ -315,7 +385,7 @@ function makeSprayBlob(): THREE.BufferGeometry {
   // of the radius of cool step and a twentieth of contour - a drawn line on a
   // large droplet, nothing at all on a small one. These are the constants
   // R_CORE and R_BODY in the fragment shader and must move with them.
-  const RINGS = [0.90, 0.96, 1.0];
+  const RINGS = [0.70, 0.86, 1.0];
 
   const vertCount = 1 + SEGMENTS * RINGS.length;
   const pos = new Float32Array(vertCount * 3);
@@ -417,7 +487,7 @@ class WakeRibbon {
   private readonly wave: THREE.BufferAttribute;
 
   constructor(material: THREE.ShaderMaterial, index: number) {
-    const verts = WAKE_MAX_POINTS * 2;
+    const verts = WAKE_MAX_POINTS * WAKE_LANES;
     const geo = new THREE.BufferGeometry();
 
     const pos = new Float32Array(verts * 3);
@@ -425,9 +495,12 @@ class WakeRibbon {
     this.position.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute('position', this.position);
 
-    // Static: which lip each vertex belongs to. Never changes, never uploaded again.
+    // Static: which lane across the ribbon each vertex belongs to, as a signed
+    // fraction of the half-width. Never changes, never uploaded again.
     const side = new Float32Array(verts);
-    for (let i = 0; i < verts; i++) side[i] = i % 2 === 0 ? -1 : 1;
+    for (let i = 0; i < verts; i++) {
+      side[i] = ((i % WAKE_LANES) - (WAKE_LANES - 1) * 0.5) / ((WAKE_LANES - 1) * 0.5);
+    }
     geo.setAttribute('aSide', new THREE.BufferAttribute(side, 1));
 
     // (arc length, age 0..1, strength, current half-width)
@@ -448,17 +521,25 @@ class WakeRibbon {
     geo.setAttribute('aWave', this.wave);
 
     // Static index buffer covering every possible quad; draw range picks how
-    // many are live. Quad j is (2j, 2j+1, 2j+2, 2j+3).
-    const quads = WAKE_MAX_POINTS - 1;
-    const idx = new Uint16Array(quads * 6);
-    for (let j = 0; j < quads; j++) {
-      const a = j * 2;
-      idx[j * 6 + 0] = a;
-      idx[j * 6 + 1] = a + 1;
-      idx[j * 6 + 2] = a + 2;
-      idx[j * 6 + 3] = a + 1;
-      idx[j * 6 + 4] = a + 3;
-      idx[j * 6 + 5] = a + 2;
+    // many are live. Segment j spans spine points j and j+1 and is stitched
+    // from WAKE_LANES-1 quads across, so the ribbon can bend over a swell
+    // across its width as well as along its length. 132 x 5 = 660 vertices is
+    // still far inside Uint16.
+    const segs = WAKE_MAX_POINTS - 1;
+    const across = WAKE_LANES - 1;
+    const idx = new Uint16Array(segs * across * 6);
+    let w = 0;
+    for (let j = 0; j < segs; j++) {
+      for (let l = 0; l < across; l++) {
+        const a = j * WAKE_LANES + l;        // this point, lane l
+        const b = a + WAKE_LANES;            // next point, lane l
+        idx[w++] = a;
+        idx[w++] = a + 1;
+        idx[w++] = b;
+        idx[w++] = a + 1;
+        idx[w++] = b + 1;
+        idx[w++] = b;
+      }
     }
     geo.setIndex(new THREE.BufferAttribute(idx, 1));
     geo.setDrawRange(0, 0);
@@ -624,6 +705,11 @@ class WakeRibbon {
       const ox = this.nx[k]! * hw;
       const oz = this.nz[k]! * hw;
 
+      // The spine's own sampled height. This used to be discarded on every wide
+      // segment; it is now the ribbon's centre lane, which is the whole reason
+      // the ribbon can hump over a crest rather than spanning it on one chord.
+      const yC = _surf.height + WAKE_LIFT;
+
       let yL: number;
       let yR: number;
       if (hw > WAKE_LIP_SAMPLE_HW) {
@@ -645,32 +731,40 @@ class WakeRibbon {
         const dyMax = hw * 0.85;
         if (dy > dyMax) dy = dyMax;
         else if (dy < -dyMax) dy = -dyMax;
-        const h = _surf.height + WAKE_LIFT;
-        yL = h - dy;
-        yR = h + dy;
+        yL = yC - dy;
+        yR = yC + dy;
       }
 
-      const vL = i * 2;
-      const vR = vL + 1;
+      // The parabola through (-1, yL), (0, yC), (+1, yR), evaluated at the two
+      // quarter lanes. `lin` is its slope term and `cur` its curvature term;
+      // when the three heights are collinear - which is exactly the narrow-
+      // segment tangent-plane case above - `cur` is zero and the ribbon is
+      // flat across, as it should be.
+      const lin = (yR - yL) * 0.25;          // (yR - yL)/2 * 1/2
+      const cur = (yL + yR - 2 * yC) * 0.125; // ((yL+yR-2yC)/2) * 1/4
+      const yQL = yC - lin + cur;
+      const yQR = yC + lin + cur;
 
-      pos[vL * 3 + 0] = x - ox;
-      pos[vL * 3 + 1] = yL;
-      pos[vL * 3 + 2] = z - oz;
-      pos[vR * 3 + 0] = x + ox;
-      pos[vR * 3 + 1] = yR;
-      pos[vR * 3 + 2] = z + oz;
-
+      const v0 = i * WAKE_LANES;
       const arc = this.dist[k]!;
       const s = this.str[k]!;
-      dat[vL * 4 + 0] = arc; dat[vL * 4 + 1] = age01; dat[vL * 4 + 2] = s; dat[vL * 4 + 3] = hw;
-      dat[vR * 4 + 0] = arc; dat[vR * 4 + 1] = age01; dat[vR * 4 + 2] = s; dat[vR * 4 + 3] = hw;
-
       const jac = _surf.jacobian;
-      wav[vL * 4 + 0] = n.x; wav[vL * 4 + 1] = n.y; wav[vL * 4 + 2] = n.z; wav[vL * 4 + 3] = jac;
-      wav[vR * 4 + 0] = n.x; wav[vR * 4 + 1] = n.y; wav[vR * 4 + 2] = n.z; wav[vR * 4 + 3] = jac;
 
-      const lo = yL < yR ? yL : yR;
-      const hi = yL < yR ? yR : yL;
+      let lo = yL;
+      let hi = yL;
+      for (let l = 0; l < WAKE_LANES; l++) {
+        // -1, -0.5, 0, +0.5, +1
+        const t = (l - (WAKE_LANES - 1) * 0.5) / ((WAKE_LANES - 1) * 0.5);
+        const y = l === 0 ? yL : l === 1 ? yQL : l === 2 ? yC : l === 3 ? yQR : yR;
+        const v = v0 + l;
+        pos[v * 3 + 0] = x + ox * t;
+        pos[v * 3 + 1] = y;
+        pos[v * 3 + 2] = z + oz * t;
+        dat[v * 4 + 0] = arc; dat[v * 4 + 1] = age01; dat[v * 4 + 2] = s; dat[v * 4 + 3] = hw;
+        wav[v * 4 + 0] = n.x; wav[v * 4 + 1] = n.y; wav[v * 4 + 2] = n.z; wav[v * 4 + 3] = jac;
+        if (y < lo) lo = y;
+        if (y > hi) hi = y;
+      }
       if (x - hw < minX) minX = x - hw;
       if (x + hw > maxX) maxX = x + hw;
       if (z - hw < minZ) minZ = z - hw;
@@ -682,7 +776,7 @@ class WakeRibbon {
     this.position.needsUpdate = true;
     this.data.needsUpdate = true;
     this.wave.needsUpdate = true;
-    this.mesh.geometry.setDrawRange(0, Math.max(0, (this.count - 1) * 6));
+    this.mesh.geometry.setDrawRange(0, Math.max(0, (this.count - 1) * (WAKE_LANES - 1) * 6));
 
     _box.min.set(minX, minY, minZ);
     _box.max.set(maxX, maxY, maxZ);
@@ -751,6 +845,13 @@ export class FoamSystem {
 
   /** Wrapped 0..1 foam scroll offsets, one per texture layer. */
   private readonly scroll = new THREE.Vector2();
+
+  // --- rooster tail: per-racer travel accumulators (see ROOSTER_PER_M) -------
+  private readonly rtX = new Float32Array(RACER_COUNT);
+  private readonly rtZ = new Float32Array(RACER_COUNT);
+  private readonly rtHas = new Uint8Array(RACER_COUNT);
+  /** Fractional droplet carried between frames, so the rate is exact over distance. */
+  private readonly rtAcc = new Float32Array(RACER_COUNT);
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -878,6 +979,92 @@ export class FoamSystem {
     const s = strength > 1 ? 1 : strength < 0 ? 0 : strength;
     if (s <= 0.002) return;
     this.ribbons[index]!.emit(pos.x, pos.z, heading, Math.max(0.12, halfWidth), s, dt);
+    this.rooster(index, pos, heading, Math.max(0.12, halfWidth), s, dt);
+  }
+
+  /**
+   * The self-driven rooster tail. See ROOSTER_PER_M for why this lives here and
+   * not at a BoatPhysics call site.
+   *
+   * Allocation-free: the accumulators are preallocated typed arrays, the
+   * randomness is the same seeded generator the rest of the system uses, and
+   * nothing here constructs a vector.
+   */
+  private rooster(
+    index: number,
+    pos: THREE.Vector3,
+    heading: number,
+    halfWidth: number,
+    strength: number,
+    dt: number,
+  ): void {
+    const dx = pos.x - this.rtX[index]!;
+    const dz = pos.z - this.rtZ[index]!;
+    const step = this.rtHas[index] === 1 ? Math.sqrt(dx * dx + dz * dz) : 0;
+    this.rtX[index] = pos.x;
+    this.rtZ[index] = pos.z;
+    this.rtHas[index] = 1;
+
+    const speed = dt > 1e-4 ? step / dt : 0;
+    if (speed < ROOSTER_MIN_SPEED || strength < ROOSTER_MIN_STRENGTH) {
+      this.rtAcc[index] = 0;
+      return;
+    }
+
+    // Rate ramps in over the planing transition rather than switching on, so a
+    // boat accelerating through 9 m/s does not suddenly sprout a tail.
+    const drive = Math.min(1, (speed - ROOSTER_MIN_SPEED) / (ROOSTER_FULL_SPEED - ROOSTER_MIN_SPEED));
+    let acc = this.rtAcc[index]! + step * ROOSTER_PER_M * drive * strength;
+    let n = Math.floor(acc);
+    if (n > ROOSTER_MAX_STEP) n = ROOSTER_MAX_STEP;
+    acc -= n;
+    this.rtAcc[index] = acc > 1 ? 1 : acc;
+    if (n <= 0) return;
+
+    // heading 0 faces +Z: forward is (sin h, cos h), starboard is (cos h, -sin h).
+    const fx = Math.sin(heading);
+    const fz = Math.cos(heading);
+    const rx = Math.cos(heading);
+    const rz = -Math.sin(heading);
+
+    // One tint per frame per boat, not per droplet - a burst of whitewater is
+    // one material, and per-particle tinting is what reads as confetti.
+    _tint.copy(_white).lerp(SPRAY_COOL_MUL, this.rng.next() * SPRAY_TINT_COOL);
+
+    for (let i = 0; i < n; i++) {
+      if (this.alive >= ROOSTER_POOL_CAP) return;
+      const j = this.alive++;
+
+      // Thrown out of the two prop-wash sheets either side of the centreline,
+      // not out of a point: a rooster tail is a pair of curtains.
+      const sgn = this.rng.next() < 0.5 ? -1 : 1;
+      const lat = sgn * this.rng.range(0.15, 1.05) * (halfWidth + 0.22);
+      const back = this.rng.range(0.05, 0.95);
+
+      this.sx[j] = pos.x - fx * back + rx * lat;
+      this.sz[j] = pos.z - fz * back + rz * lat;
+      // Clear of the surface, so a droplet is never born already colliding with
+      // the water it is supposed to be leaving.
+      this.sy[j] = pos.y + this.rng.range(0.14, 0.34);
+
+      const up = this.rng.range(2.6, 5.6) * (0.62 + 0.38 * strength);
+      const aft = speed * this.rng.range(0.10, 0.30);
+      const out = this.rng.range(0.5, 2.4);
+      this.svx[j] = -fx * aft + rx * sgn * out;
+      this.svy[j] = up;
+      this.svz[j] = -fz * aft + rz * sgn * out;
+
+      this.sSize[j] = ROOSTER_SIZE_MIN + ROOSTER_SIZE_SPAN * this.rng.next();
+      this.sLife[j] = 0;
+      this.sInvLife[j] = 1 / this.rng.range(0.40, 0.95);
+      this.sState[j] = FLYING;
+      this.sWaterY[j] = -1e9;
+      this.sWaterT[j] = -1e9;
+      this.sWaterDt[j] = this.rng.range(SPRAY_H_REFRESH_MIN, SPRAY_H_REFRESH_MAX);
+      this.sTint[j * 3 + 0] = _tint.r;
+      this.sTint[j * 3 + 1] = _tint.g;
+      this.sTint[j * 3 + 2] = _tint.b;
+    }
   }
 
   /**
@@ -1143,6 +1330,8 @@ export class FoamSystem {
     this.sprayMesh.count = 0;
     this.interactors.length = 0;
     this.scroll.set(0, 0);
+    this.rtHas.fill(0);
+    this.rtAcc.fill(0);
   }
 
   /** Global fade, for the results screen or a cinematic. */

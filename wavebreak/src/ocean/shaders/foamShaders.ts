@@ -106,7 +106,7 @@ export const WAKE_VERT = /* glsl */ `
 // identity transform and the CPU writes absolute positions, because the spine
 // is resampled against the ocean surface every frame anyway and a local frame
 // would only add a matrix multiply to undo.
-in float aSide;   // -1 / +1: which lip of the ribbon this vertex is
+in float aSide;   // -1 .. +1 in five steps: which lane across the ribbon this vertex is
 in vec4  aData;   // x arc length (m), y age 0..1, z strength 0..1, w half-width (m)
 // The ocean's own analytic surface at this spine point, sampled on the CPU in
 // the same solve that seats the vertex: xyz is the wave normal, w the horizontal
@@ -194,14 +194,64 @@ const float FOAM_TEETH_M = 0.145;
 const float FOAM_HOLE_M  = 0.52;
 const float NOISE_PERIOD = 32.0;   // cells; 25 m before the primary layer repeats
 
-// How deep an interior hole cuts, and where the hole layer is cut. Holes are
-// thresholded before they are subtracted, so their rims are hard - a soft hole
-// would read as a smudge in the middle of a white shape. The hole layer carries
-// its own second octave for the same reason the silhouette does: a single
-// octave of value noise punches suspiciously round holes, and a round hole with
-// a contour drawn round it is a clip-art bubble.
-const float HOLE_T = 0.60;
-const float HOLE_DEPTH = 1.30;
+// The FORM layer. This is a shading-only octave - it never opens or closes a
+// region, it only decides which side of a multi-metre lump of whitewater is
+// turned toward the sun.
+//
+// It exists because the two shading terms this file used to have were both the
+// wrong SIZE. The per-island rim is a fixed width in metres, so on the merged
+// near-wake mass (many metres across, and most of the lower frame from a chase
+// camera) it is a sliver; the swell band is set by the 78 m / 51 m / 27.5 m
+// wave components, so one band is 13-39 m across and the entire visible ribbon
+// lands inside a single one and draws as one flat value. Measured over the
+// wake camera's ribbon rect, that produced 67% of the foam area in the shade
+// tone as one unbroken region - a flat blue plate, which is the same defect as
+// a flat white plate.
+//
+// 2.6 m is the scale a cel painter actually draws foam form at: two or three
+// lit/shaded masses across a spread wake, each one still far larger than the
+// 0.8-1.5 m silhouette islands, so the shading reads as volume on the mass
+// rather than as a second silhouette competing with it. It is probed as a
+// directional difference (see formLit in main) rather than as a plain
+// threshold, so the shade lands on the down-sun FLANK of each lump - which is
+// what makes it read as form and not as a second layer of blobs.
+const float FOAM_FORM_M  = 2.6;
+const float FORM_SHADE_M = 1.0;
+// Bias on the form difference, and how far the swell band moves it.
+//
+// The difference of the 2.6 m octave across a 1.0 m lag is symmetric about zero
+// with a standard deviation of 0.142 (measured over 400k samples of this exact
+// hash, not assumed), so the bias maps directly onto a lit fraction: +0.18
+// leaves 89% of a sun-facing swell lit, and +0.18-0.34 = -0.16 leaves 14% of
+// the swell's back face lit.
+//
+// That is the whole relationship between the two scales. The swell does not get
+// its own flat tone any more - it MOVES THE FORM THRESHOLD. Giving it its own
+// tone is what produced the measured failure: one band is 13-39 m across, wider
+// than the drawn wake, so the entire ribbon fell inside a single band and drew
+// as one value with a hard straight line across it. Driving the form threshold
+// instead means a ribbon on a sun-facing swell still has form shadow (just
+// less of it), a ribbon on the back of one is mostly shadow with a few lit
+// tops, and the transition between the two is a change of shadow density
+// rather than a step to a different flat colour.
+const float FORM_BIAS  = 0.24;
+const float FORM_SWELL = 0.10;
+
+// Where the hole layer is cut. Holes are a *threshold* on their own noise
+// rather than a variable-depth subtraction from the silhouette field: that
+// makes a hole rim a true iso-line of a single signal, which is what lets the
+// contour below be cut from the same pixel-space distance as the alpha. A
+// hole rim with a well-behaved derivative is also what stops the contour on it
+// pulsing in width as the noise flattens with distance.
+//
+// HOLE_OFF is the cut when the hole layer is LOD'd away entirely - above the
+// layer's own maximum, so distant foam is solid rather than dissolving into
+// dots. HOLE_BASE/HOLE_GAIN map the age-and-centreline hole drive onto the cut:
+// fresh outer foam lands near 0.89 (a scatter of bites) and old centreline foam
+// near 0.41 (more hole than foam).
+const float HOLE_OFF  = 1.30;
+const float HOLE_BASE = 0.78;
+const float HOLE_GAIN = 0.26;
 
 // How far to probe for the shaded side, in metres, on a sun-facing and on a
 // down-sun facet of the swell. This is the width of the down-sun band, so it is
@@ -218,22 +268,40 @@ const float HOLE_DEPTH = 1.30;
 // between them - a drawn shadow shape, not a shading term.
 //
 // A rim is a fixed width in metres, though, and the near wake is one merged mass
-// many metres across on which even 0.30 m is a sliver. The large-scale form
-// comes from the swell instead - see waveLit in main().
-const float SHADE_M = 0.30;
+// many metres across on which even 0.30 m is a sliver. The mid-scale form comes
+// from FOAM_FORM_M and the large-scale form from the swell - see main().
+//
+// 0.55 m against a 0.8-1.5 m island is a shadow that is a third to a half of
+// the shape wide, which is a drawn shadow rather than a hairline. It is probed
+// with the PRIMARY octave only: the lace and teeth layers exist to scallop the
+// silhouette, and carrying them into the shade probe made the shadow's own edge
+// a second copy of the silhouette's serrations a few centimetres away, which
+// read as a fringe rather than as an edge.
+const float SHADE_M = 0.40;
+// Bias on the 0.78 m directional difference, whose standard deviation at a
+// 0.40 m lag is 0.1345 (measured over 300k samples of this exact hash). +0.06
+// therefore leaves 68% of the foam lit and puts the remaining 32% on the
+// down-sun flanks - a drawn shadow on every island, at every age, everywhere
+// in the frame.
+const float RIM_BIAS = 0.06;
 
 // -- thresholds ---------------------------------------------------------------
 // A fresh wake keeps a bit over half the field, an exhausted one keeps nothing:
 // T_SPENT sits above the field's own maximum on purpose, so the tail is
 // guaranteed to erode to bare water rather than thinning to a permanent haze.
-const float T_FRESH = 0.22;
+// T_FRESH went up from 0.22. At 0.22 the field keeps almost two thirds of its
+// range straight off the transom, so the near wake in the chase frame came out
+// as one unbroken white plate with a ruled edge - the "ice sheet" note. At 0.28
+// the fresh mass is still solid but the silhouette is cut close enough to the
+// field's own structure that its outline is drawn rather than geometric.
+const float T_FRESH = 0.28;
 const float T_SPENT = 0.96;
 
 // How much further the threshold climbs at the ribbon's outer lips. Without it
 // the wake would end in two dead-straight ruled lines - the geometry's edges.
 // With it the silhouette is cut by the blob field and comes out scalloped, and
 // the outermost foam breaks into separate clumps.
-const float EDGE_BITE = 0.38;
+const float EDGE_BITE = 0.50;
 
 // Width of the drawn contour, in *fragments*. The aa term below is one
 // fragment's worth of the field, so scaling the inner cut by it locks the line
@@ -242,9 +310,9 @@ const float EDGE_BITE = 0.38;
 //
 // 1.5 was a single retina fragment: on the delivered 2560-wide frame it was
 // there in the file and gone on screen, so the foam met the water with no line
-// at all and sat on the surface like a cut-out. 2.6 is a line you can see at
+// at all and sat on the surface like a cut-out. 3.0 is a line you can see at
 // presentation size without being wide enough to swallow a small island whole.
-const float INK_PX = 2.6;
+const float INK_PX = 3.0;
 
 /**
  * The foam field: primary blob layer, a rotated lace octave that scallops the
@@ -263,6 +331,16 @@ float wbFoamField(vec2 q, vec2 sc, float lace, float teeth) {
   return a * 0.74 + (b - 0.5) * 0.40 * lace + (c - 0.5) * 0.24 * teeth;
 }
 
+/**
+ * The silhouette-deciding octave on its own, in the same units as
+ * wbFoamField(). The lace and teeth terms are zero-mean, so this is the same
+ * signal with its boundary serrations removed - which is exactly what the shade
+ * probe wants, and it costs one hash pair instead of three.
+ */
+float wbFoamBase(vec2 q, vec2 sc) {
+  return wbVal(q / FOAM_BLOB_M + vec2(sc.x, 0.0), NOISE_PERIOD) * 0.74;
+}
+
 void main() {
   float edge = abs(vSide);
   vec2 q = vWorldXZ;
@@ -270,10 +348,23 @@ void main() {
 
   // Metres of world covered by one pixel here. Everything finer than this is
   // faded out rather than left to alias into stipple.
+  //
+  // The fade window is specified as "this layer's feature is 16 px" to "this
+  // layer's feature is 8 px", i.e. M/fp between 16 and 8. The previous window
+  // was M*0.30 to M*0.95, which is a feature 3.3 px wide down to 1.05 px: the
+  // teeth layer at 0.145 m therefore drew from the camera out to about 230 m,
+  // and 1-3 px scallops on a grazing wake are not drawing, they are aliasing -
+  // the ruled diagonal static reported on the low-water frame. Under this rule
+  // teeth die by ~30 m, lace by ~68 m and holes by ~108 m, so every layer stops
+  // while its features are still unmistakably shapes.
   float fp = max(fwidth(q.x), fwidth(q.y));
-  float lace    = 1.0 - smoothstep(FOAM_LACE_M  * 0.30, FOAM_LACE_M  * 0.95, fp);
-  float teeth   = 1.0 - smoothstep(FOAM_TEETH_M * 0.30, FOAM_TEETH_M * 0.95, fp);
-  float holeLod = 1.0 - smoothstep(FOAM_HOLE_M  * 0.30, FOAM_HOLE_M  * 0.95, fp);
+  float lace    = 1.0 - smoothstep(FOAM_LACE_M  * 0.0625, FOAM_LACE_M  * 0.125, fp);
+  float teeth   = 1.0 - smoothstep(FOAM_TEETH_M * 0.0625, FOAM_TEETH_M * 0.125, fp);
+  float holeLod = 1.0 - smoothstep(FOAM_HOLE_M  * 0.0625, FOAM_HOLE_M  * 0.125, fp);
+  // The cross-wake arc pattern has a 4.65 m period and is the coarsest of the
+  // detail terms, so it survives furthest - but it is also the one that reads
+  // as ruled stripes when it goes sub-pixel across a grazing ribbon.
+  float arcLod  = 1.0 - smoothstep(4.65 * 0.0625, 4.65 * 0.125, fp);
 
   float base = wbFoamField(q, sc, lace, teeth);
   // aa comes from the *smooth* part of the field only. Taking it after the hole
@@ -302,16 +393,24 @@ void main() {
   vec2 hq2 = wbSpin(q, 0.290, 0.957) / FOAM_TEETH_M + vec2(-sc.x, sc.y);
   float hole = wbVal(hq, NOISE_PERIOD) + (wbVal(hq2, NOISE_PERIOD) - 0.5) * 0.22 * teeth;
   float haa = max(fwidth(hole) * 1.2, 1e-4);
-  // A small constant term so a fresh mass is not a featureless plate - at three
-  // metres from a chase camera one 0.78 m blob covers most of the lower frame,
-  // and the round-1 review called exactly that an ice sheet.
-  float holeAge = 0.22 + 1.00 * smoothstep(0.14, 0.80, vAge);
-  float holeAmt = holeLod * holeAge * (0.62 + 0.60 * centre);
-  float field = base - HOLE_DEPTH * holeAmt * wbCrisp(hole, HOLE_T, haa);
+  // A constant term so a fresh mass is not a featureless plate - at three metres
+  // from a chase camera one 0.78 m blob covers most of the lower frame, and the
+  // round-1 review called exactly that an ice sheet. It went 0.22 -> 0.30 with
+  // T_FRESH, because the chase frame's near wake was still a plate.
+  float holeAge = 0.30 + 1.00 * smoothstep(0.14, 0.80, vAge);
+  // Holes are now driven as a CUT on the hole layer rather than as a
+  // variable-depth subtraction from the silhouette field. Same erosion, but the
+  // rim of a hole becomes an iso-line of one signal, so a single signed
+  // distance below can cut the alpha and the contour from the same place. When
+  // holeLod reaches zero the cut goes above the layer's maximum and distant
+  // foam is solid rather than dissolving into a dot screen.
+  float holeCut = mix(HOLE_OFF, HOLE_BASE - HOLE_GAIN * holeAge * (0.62 + 0.60 * centre), holeLod);
 
   // Cross-wake arcs at the hull's own oscillation scale, so the ribbon carries
-  // visible transverse structure instead of one continuous density.
-  float arcs = sin(vArc * 1.35 + edge * 2.6);
+  // visible transverse structure instead of one continuous density. Faded with
+  // distance for the same reason as the noise layers: at a grazing angle its
+  // 4.65 m period collapses under a pixel and draws as ruled stripes.
+  float arcs = sin(vArc * 1.35 + edge * 2.6) * arcLod;
 
   float thresh = mix(T_FRESH, T_SPENT, vAge * vAge)
                + EDGE_BITE * edge * edge                      // scalloped silhouette
@@ -319,7 +418,7 @@ void main() {
                - centre * 0.34 * propWash                     // hard core off the transom
                - propWash * 0.12                              // ... solid right across it
                - shoulder * 0.24                              // dense Kelvin arms
-               + arcs * 0.050 * (1.0 - vAge);
+               + arcs * 0.035 * (1.0 - vAge);
 
   // Weak wakes (idling, coasting) should thin out, not just get transparent.
   thresh += (1.0 - vStrength) * 0.24;
@@ -332,16 +431,33 @@ void main() {
   thresh -= crest * 0.18;
   thresh += (1.0 - crest) * 0.06;
 
-  float mOuter = wbCrisp(field, thresh,               aa);
-  // The contour is cut against the *unpunched* field on purpose. Taking it
-  // against the holed field draws a closed loop round every hole, and a small
-  // round hole with a line round it is a clip-art bubble - which is exactly
-  // what the last pass was reported as. Drawn from the base field the ink only
-  // ever appears on the mass's outer silhouette; holes come out as clean hard
-  // bites of open water, which is what punched foam actually looks like. There
-  // is no risk of a stray line inside the water, because ink is only visible
-  // where the foam is opaque and the foam is opaque only where base >= thresh.
-  float mInner = wbCrisp(base,  thresh + aa * INK_PX, aa);
+  // --- one signed distance, in pixels, for BOTH the alpha and the contour ----
+  //
+  // This is the fix for the single most visible defect in the delivered frames:
+  // the alpha used to be cut from (base - holes) while the ink was cut from
+  // the base field alone. Wherever a silhouette edge was produced by a hole -
+  // which is most of the eroding tail and all of the interior - base was above
+  // threshold, the inner mask evaluated to 1, and no line was drawn at all. At
+  // 1:1 the near wake was a pale slab with hard-edged navy holes punched
+  // through it and not one pixel of contour between the two, which is why the
+  // mass read as cut paper lying on the water instead of as foam in it.
+  //
+  // Both cuts now come off the same quantity: the pixel-space distance to the
+  // nearest boundary, whichever kind it is. dOuter is how many pixels inside
+  // the silhouette this fragment is; dHole is how many pixels outside the
+  // nearest hole. Their min is the distance to the drawn edge, so the contour
+  // follows every foam/water boundary in the frame by construction.
+  //
+  // The clip-art-bubble failure this used to guard against is handled instead
+  // by the two constraints that actually cause it: holes stay at FOAM_HOLE_M =
+  // 0.52 m and are killed outright below an 8 px feature, so a hole is never a
+  // small round dot with a ring round it.
+  float dOuter = (base - thresh) / aa;
+  float dHole  = (holeCut - hole) / haa;
+  float d      = min(dOuter, dHole);
+
+  float mOuter = clamp(d + 0.5, 0.0, 1.0);
+  float mInner = clamp(d - INK_PX + 0.5, 0.0, 1.0);
 
   // The ocean's own lit/unlit split, taken from the wave normal at this spine
   // point, so the ribbon steps exactly where the water under it does. The normal
@@ -366,15 +482,54 @@ void main() {
   // draws in the shade tone with a hard line across the ribbon where the water
   // turns away. Because the normal is re-solved per spine point per frame, that
   // banding travels along the trail as the swell moves under it.
-  float waveLit = step(uSunDir.y * 0.96, dot(normalize(vWaveN), uSunDir));
+  // The bias moved from 0.96 to 0.93. At 0.96 the terminator sat high enough
+  // that 41% of the sea surface was on the dark side of it, and because one
+  // swell band is 13-39 m across, a whole visible ribbon lands inside one band:
+  // the measured result was 67% of the ribbon's foam area drawn in the shade
+  // tone as a single unbroken region. 0.93 puts roughly 30% of the sea in
+  // shade, which keeps the band as the LARGEST of three nested scales instead
+  // of swamping the two below it.
+  float waveLit = step(uSunDir.y * 0.93, dot(normalize(vWaveN), uSunDir));
 
-  // The SMALL-scale form: the down-sun side of each drawn silhouette. Probing
-  // the field a fixed number of metres *away* from the sun lands outside the
-  // blob only on its down-sun rim, so the step is a drawn shadow edge with a
-  // hard boundary rather than a dot product smeared over the shape.
   vec2 sunXZ = normalize(uSunDir.xz + vec2(1e-5, 1e-5));
-  float away = wbFoamField(q - sunXZ * SHADE_M, sc, lace, teeth);
-  float mLit = wbCrisp(away, thresh, aa);
+
+  // The MID-scale form, and the term this file was missing. A wake is not a
+  // collection of separate islands at chase distance - it is one merged mass
+  // several metres across, and a mass with no structure between the 0.5 m rim
+  // and the 20 m swell band draws as a plate at either the light or the dark
+  // value. This probes a 2.6 m octave as a directional difference along the sun
+  // vector: where the coarse field rises toward the sun the fragment is on a
+  // sun-facing flank and stays lit, where it falls the fragment is on the
+  // down-sun flank of the same lump and steps to the shade tone. The boundary
+  // is a hard step on a smooth signal, so it is a drawn shadow edge running
+  // across the mass, not a gradient.
+  vec2 fq = q / FOAM_FORM_M;
+  float formHere = wbVal(fq + vec2(sc.y * 0.35, sc.x * 0.35), NOISE_PERIOD);
+  float formBack = wbVal(fq - sunXZ * (FORM_SHADE_M / FOAM_FORM_M)
+                            + vec2(sc.y * 0.35, sc.x * 0.35), NOISE_PERIOD);
+  float formLit = step(formBack, formHere + FORM_BIAS - (1.0 - waveLit) * FORM_SWELL);
+
+  // The SMALL-scale form: the down-sun flank of each drawn silhouette, at the
+  // same 0.78 m scale that decides the silhouette itself.
+  //
+  // This is a directional difference on the primary octave, NOT the old
+  // "is the probe still inside the mass" test, and the difference is the
+  // reason the near wake used to be a plate. That test compared the down-sun
+  // probe against thresh - the *erosion* threshold - and thresh carries the
+  // prop-wash terms, which subtract 0.46 straight off the transom. On fresh
+  // centreline foam thresh goes to about -0.15, below the field's own floor,
+  // so the probe passed everywhere and the rim shade evaluated to fully lit
+  // across the entire near wake: measured 4.1% shade over the chase frame's
+  // near-wake rect while the same shader measured 43% over the mid-distance
+  // ribbon. A shading term must not be coupled to an erosion threshold.
+  //
+  // Differencing instead is threshold-free by construction: it asks whether
+  // this patch of foam rises or falls toward the sun, so every blob gets a lit
+  // half and a shaded half with one hard line between them, on fresh foam and
+  // on spent foam alike.
+  float hereB = wbFoamBase(q, sc);
+  float awayB = wbFoamBase(q - sunXZ * SHADE_M, sc);
+  float rimLit = step(awayB, hereB + RIM_BIAS);
 
   // Opacity holds at one for the first 86% of the ribbon's life and is gone by
   // the end of it - a shade under four seconds at WAKE_LIFE. By the time it
@@ -385,16 +540,18 @@ void main() {
   if (alpha < 0.004) discard;
 
   // Two tones and a drawn contour. Nothing else: PALETTE.foam is the lit side,
-  // PALETTE.foamShade is the down-sun side, the boundary between them is one
-  // hard step, and there is no gradient anywhere. What gives the mass its volume
-  // is that the shadow is a *shape* - the silhouette offset down-sun - rather
-  // than a shading term, so it has its own drawn edge running through the foam.
-  // Both terms are multiplied, so the two mechanisms give three readings out of
-  // two tones: foam on the lit part of a shape lying on a sun-facing swell,
-  // shade on that shape's down-sun rim, and shade across the whole of any
-  // segment lying on the swell's back face.
+  // PALETTE.foamShade is the down-sun side, every boundary between them is one
+  // hard step, and there is no gradient anywhere.
+  //
+  // Two mechanisms, not three, and they are at different scales on purpose: the
+  // 0.55 m rim on each drawn silhouette, and the 2.6 m form band whose own
+  // threshold the swell drives (see FORM_SWELL). Multiplying two terms lands
+  // the shaded fraction where a drawn cel mass wants it; the previous code
+  // multiplied a rim against a swell band, which is two terms neither of which
+  // was at the size of the drawn shape, and measured 67% shade in one flat
+  // region.
   vec3 col = uFoamColor;
-  col = mix(uFoamShade, col, mLit * waveLit);
+  col = mix(uFoamShade, col, rimLit * formLit);
   col = mix(uFoamEdge, col, mInner);  // contour on the silhouette and hole rims
 
   gColor = vec4(col, alpha);
@@ -492,8 +649,19 @@ in vec3  vViewNormal;
 // and a twentieth of the radius, which is a drawn line on a large droplet and
 // vanishes entirely on a small one - the same behaviour the ribbon's contour
 // gets from being specified in fragments.
-const float R_CORE = 0.90;
-const float R_BODY = 0.96;
+// They came back in, to 0.70 / 0.86. At 0.90 / 0.96 the contour was 4% of the
+// radius: on a 20 px droplet that is 0.4 px, so the whole particle drew as a
+// featureless white chip. That is invisible over water only in the sense that
+// it is not invisible - over the WAKE RIBBON, which is where essentially every
+// droplet is, a white chip on white foam disappears completely, and it is why
+// the delivered frames read as having no spray at all even with the pool
+// running (measured: 94 live droplets in the chase frame and not one of them
+// legible). A drawn white object on a white ground needs a line, so the outer
+// 14% of the radius is now that line and the 16% inside it is the cool tone. On
+// a 20 px droplet that is a 1.4 px contour, and on a 6 px one it falls under a
+// fragment and the droplet correctly resolves to a solid chip again.
+const float R_CORE = 0.70;
+const float R_BODY = 0.86;
 
 void main() {
   float alpha = vAlpha * uOpacity;
@@ -506,7 +674,10 @@ void main() {
   // black one.
   vec3 col = uFoamColor;
   col = mix(col, uFoamShade, step(R_CORE, vRadial));
-  col = mix(col, mix(uFoamShade, uFoamEdge, 0.42), step(R_BODY, vRadial));
+  // 0.42 -> 0.72 toward the contour tone. A droplet's line has to survive being
+  // drawn over foam white, and at 0.42 it was a pale blue-grey that read as part
+  // of the foam it was sitting on.
+  col = mix(col, mix(uFoamShade, uFoamEdge, 0.72), step(R_BODY, vRadial));
   col *= vTint;
 
   gColor = vec4(col, alpha);

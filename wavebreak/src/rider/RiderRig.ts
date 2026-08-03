@@ -622,7 +622,22 @@ function buildSuit(): THREE.BufferGeometry {
     // cannot read as a separate form no matter how far out it is held.
     b.tube([sh, _t.clone(), el], [0.054, 0.057, 0.043], R_LIMB, 0.85, 0.5);
     b.use([`upperArm${S}`, `foreArm${S}`, `hand${S}`]);
-    b.tube([el, wr], [0.042, 0.034], R_LIMB, 0.4, 0.35);
+    /*
+     * THE FOREARM HAS A WRIST NOW.
+     *
+     * It used to be [0.042, 0.034] over two points - a 21% taper across 235mm,
+     * which at the size these frames render is a constant-diameter pipe that
+     * stops dead in the glove. Measured off the shipped rider crop: the dark
+     * cuff (0.046) was smaller than the mitt it was meant to flare over (0.049)
+     * *and* barely larger than the tube it was meant to step off, so it was
+     * invisible from every angle and the arm simply ended in a plate.
+     *
+     * Three points instead: a belly just below the elbow where the flexors sit,
+     * then a hard run down to 0.026 at the wrist. The cuff is now 1.8x the wrist
+     * it sits on, which is a cuff, and the glove is 2x it, which is a fist.
+     */
+    _t.copy(el).lerp(wr, 0.35);
+    b.tube([el, _t.clone(), wr], [0.043, 0.039, 0.026], R_LIMB, 0.4, 0.2);
   }
 
   for (const side of [1, -1]) {
@@ -715,19 +730,62 @@ function buildGear(): THREE.BufferGeometry {
     R_TORSO, false, false,
   );
 
+  /*
+   * GLOVES.
+   *
+   * The old hand was one `b.sphere(..., 7, 4)`, and in a 1:1 crop of the shipped
+   * rider frame that is exactly what it looked like: a flat dark heptagon laid
+   * on the bar, no thumb, no knuckle, no wrist. A seven-sided ball seen anywhere
+   * near a facet normal is a polygon, and the ink pass obligingly drew it.
+   *
+   * A fist is not a ball, and what makes it read as a hand is not resolution -
+   * it is the two shapes that break the outline. So: a barrel across the bar, a
+   * knuckle plate standing proud of the back of it, and a thumb.
+   *
+   * ORIENTATION. The geometry is authored in the rest pose (arms hanging, -Y
+   * down the arm) but it has to look right in the *racing* pose, so where the
+   * rest axes end up is load-bearing. Working it through the animator: the
+   * forearm's world rotation is `setFromUnitVectors((0,-1,0), fore)`, and with
+   * the shoulder at (0.21, 1.11, 0.20) reaching a wrist at (0.26, 0.85, 0.50)
+   * the forearm runs (-0.258, -0.247, 0.916). That rotation carries
+   *   rest -Y -> down the arm, onto the bar
+   *   rest +X -> (0.944, -0.263, 0.197), i.e. along the crossbar, 19 deg off
+   *   rest +Z -> (0.197, 0.933, 0.302), i.e. very nearly straight up
+   * so the barrel is swept along X, the knuckle plate goes on +Z (the back of
+   * the hand, facing the sky, which is where it belongs on a hand gripping a bar
+   * from above) and the thumb runs inboard off the top. `hand.rotation` then
+   * cocks the whole thing back about local X, which is the wrist, not the roll.
+   *
+   * Cost: 117 triangles a hand against the old 58.
+   */
   for (const side of [1, -1]) {
     const wr = armPoints(side)[2]!;
     const S = side > 0 ? 'R' : 'L';
-    // Glove: a rounded mitt centred on the grip, not a brick hanging off the
-    // wrist. The IK targets the wrist, so the ball has to sit where the hand
-    // closes around the bar. Oversized on purpose - at 60px tall a correctly
-    // scaled hand is two pixels and the arm just ends.
+    // The IK lifts its wrist target ~4cm off the handle because the fist sits
+    // that much further down the arm - so this offset is not decoration, it is
+    // the other half of that contract. Move it and the hands leave the bars.
+    const fy = wr.y - 0.046;
+    const fz = wr.z + 0.012;
+
     b.use([`foreArm${S}`, `hand${S}`]);
-    b.sphere(wr.x, wr.y - 0.040, wr.z + 0.013, 0.049, 0.055, 0.047, 7, 4);
-    // Cuff, so the wrist is a joint and not a taper into a ball.
-    b.use([`foreArm${S}`, `hand${S}`]);
-    b.tube([wr.clone().add(_t.set(0, 0.028, 0)), wr.clone().add(_t.set(0, -0.011, 0))],
-      [0.043, 0.046], R_LIMB, 0, 0);
+    // Fist: elongated across the bar and slightly flattened top to bottom.
+    // Nine sides rather than seven, because the whole complaint was that it
+    // read as a polygon.
+    b.sphere(wr.x, fy, fz, 0.053, 0.045, 0.047, 9, 4);
+    // Knuckles: a proud slab across the back of the fist. 9mm clear of the
+    // barrel at the crown, so it is a separate form with its own ink line
+    // rather than a bump inside the silhouette.
+    b.box(wr.x, fy - 0.002, fz + 0.038, 0.040, 0.029, 0.014, 0.88, 1);
+    // Thumb, off the top inboard corner and running inboard along the bar. At
+    // the size these frames render, this one 55mm tube is the whole difference
+    // between a hand and a mitten. No start cap - the root is inside the fist.
+    _u.set(wr.x - side * 0.028, fy + 0.012, fz + 0.028);
+    _v.copy(_u).add(_n.set(-side * 0.048, -0.014, 0.024));
+    b.tube([_u.clone(), _v.clone()], [0.020, 0.014], 5, 0, 0.7);
+    // Cuff, so the wrist is a joint and not a taper into a ball. It flares over
+    // a 0.026 wrist now (see buildSuit), which is why it is finally visible.
+    b.tube([wr.clone().add(_t.set(0, 0.034, 0)), wr.clone().add(_t.set(0, -0.008, 0))],
+      [0.042, 0.047], R_LIMB, 0, 0);
   }
 
   for (const side of [1, -1]) {
@@ -869,12 +927,30 @@ function buildScarf(): THREE.BufferGeometry {
   const n = pts.length;
   for (let i = 0; i < n; i++) {
     const u = i / (n - 1);
-    // Slight swell just past the neck, then a hard taper to a point.
-    const swell = 1 + 0.10 * Math.sin(Math.min(1, u * 3.2) * Math.PI);
-    w.push((0.060 * (1 - u) ** 1.25 + 0.016) * swell);
-    // Twist accelerates down the length; by the tip the ribbon is nearly edge-on
-    // to its own root, which is what stops a long scarf reading as one board.
-    roll.push(1.95 * u * u + 0.10 * u);
+    /*
+     * WIDTH IS LOBED, NOT TAPERED.
+     *
+     * It used to be a monotone taper with a single 10% swell - one straight edge
+     * from nape to tip, which is the outline of a blade. Cloth in a slipstream
+     * does not have a straight edge: it bellies where it is slack and pinches
+     * where it is pulled, and the eye reads those alternating lobes as fabric
+     * before it reads anything else. 1.5 cycles over the length gives three
+     * visible changes of width, ranging 0.74 to 1.26 of the taper, and the
+     * -0.10u term keeps the tip from bellying as hard as the root.
+     */
+    w.push((0.052 * (1 - u) ** 1.15 + 0.019)
+      * (1 + 0.26 * Math.sin(u * Math.PI * 3.1 + 0.55) - 0.10 * u));
+    /*
+     * TWIST IS NOT MONOTONE EITHER.
+     *
+     * `1.95u^2 + 0.10u` only ever turns one way, so the ribbon showed its face
+     * at the neck, rolled steadily, and showed its edge at the tip - one
+     * continuous surface with one continuous shading gradient. The sine term
+     * takes it 0 -> 0.57 -> 0.40 -> 0.75 -> 2.17 rad instead: face, edge, face,
+     * then hard over. Every reversal is a place the light changes, which is
+     * what a flapping scarf actually does and what a single roll never can.
+     */
+    roll.push(1.75 * u * u + 0.18 * u + 0.42 * Math.sin(u * Math.PI * 2.2));
   }
   b.ribbon(pts, w, 0.010, roll);
   return b.build('rider_scarf');

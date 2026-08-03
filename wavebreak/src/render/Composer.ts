@@ -51,6 +51,25 @@ const DEPTH_THRESHOLD = 0.075;
  */
 const NORMAL_THRESHOLD = 0.20;
 
+/**
+ * The same two thresholds for surfaces that have opted all the way in to the ink
+ * - anything whose `edgeMask` clears 0.85, which is hulls, metal and cloth. The
+ * composite interpolates between each conservative value above and its hard twin
+ * here using `smoothstep(0.45, 0.85, edgeMask)`.
+ *
+ * The pair above have to stay conservative because they are what the OCEAN gets,
+ * and the ocean is a million grazing triangles running to the horizon. But that
+ * conservatism was also what starved the interior pass: 0.20 is a 37-degree
+ * crease, and almost nothing a boat is made of breaks that sharply, so panel
+ * lines simply never drew. 0.060 is a ~20-degree crease, which is where a
+ * chamfered panel break actually lives.
+ *
+ * Splitting them rather than lowering them is what keeps the ocean and the
+ * silhouettes safe; the arithmetic for both is written out in the composite.
+ */
+const DEPTH_THRESHOLD_HARD = 0.040;
+const NORMAL_THRESHOLD_HARD = 0.060;
+
 const EDGE_STRENGTH = 1.0;
 
 /** How far the ink multiply pulls a line's value down before tinting. */
@@ -200,6 +219,8 @@ export class Composer {
       uEdgeRadius: { value: 1 },
       uDepthThreshold: { value: DEPTH_THRESHOLD },
       uNormalThreshold: { value: NORMAL_THRESHOLD },
+      uDepthThresholdHard: { value: DEPTH_THRESHOLD_HARD },
+      uNormalThresholdHard: { value: NORMAL_THRESHOLD_HARD },
       uEdgeStrength: { value: EDGE_STRENGTH },
       uInk: { value: PALETTE.inkSoft.clone() },
       uInkDarken: { value: INK_DARKEN },
