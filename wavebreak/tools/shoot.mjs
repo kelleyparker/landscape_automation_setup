@@ -41,6 +41,7 @@ function parseArgs(argv) {
     settle: 0,
     noDrive: false,
     noHud: false,
+    phase: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     else if (a === '--settle') out.settle = Number(next());
     else if (a === '--no-drive') out.noDrive = true;
     else if (a === '--no-hud') out.noHud = true;
+    else if (a === '--phase') out.phase = next();
     else if (a === '--keep') out.keep = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--list') out.list = true;
@@ -143,6 +145,9 @@ async function main() {
     deviceScaleFactor: ARGS.dpr,
   });
   const page = await context.newPage();
+  // SwiftShader composites slowly, and a screenshot has to wait for a real
+  // frame. 30s is not enough on the heavier screens; this is harness-only.
+  page.setDefaultTimeout(180_000);
 
   const consoleErrors = [];
   const pageErrors = [];
@@ -195,6 +200,13 @@ async function main() {
     if (ARGS.noHud) await page.evaluate(() => window.__wavebreak.setHud(false));
     log(`> advancing sim to t=${ARGS.time}s`);
     await page.evaluate((t) => window.__wavebreak.advanceTo(t), ARGS.time);
+
+    // Force a race phase after advancing, so the countdown and results screens
+    // - which a normal capture at t=42 would never show - can be reviewed too.
+    if (ARGS.phase) {
+      await page.evaluate((p) => window.__wavebreak.phase(p), ARGS.phase);
+      await page.evaluate(() => window.__wavebreak.renderFrames(10));
+    }
 
     for (const shot of shots) {
       const ok = await page.evaluate((s) => window.__wavebreak.setShot(s), shot);
