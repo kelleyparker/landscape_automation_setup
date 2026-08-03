@@ -322,13 +322,22 @@ const DEEP_TINT = PALETTE.waterDeep.clone().lerp(PALETTE.waterShallow, 0.34);
  * produced it read as a sandbar lying on the sea, which is what `lowwater`
  * showed at 128k contiguous pixels.
  *
- * Toward `foam` instead it is sRGB (162, 246, 233), hue 171 - the same jade,
- * one value step up and a little paler, which is what light exiting a thin
- * crest actually looks like. The hue separation the warm pull was buying is
- * already there: at 171 the jade is the palette's only break from the 186-214
- * blue-cyan axis the rest of the sea lives on.
+ * Toward `foam` instead it is the same jade, one value step up and a little
+ * paler, which is what light exiting a thin crest actually looks like. The hue
+ * separation the warm pull was buying is already there: at 171 the jade is the
+ * palette's only break from the 186-214 blue-cyan axis the rest of the sea
+ * lives on.
+ *
+ * The pull is 0.26 and not 0.40. At 0.40 this lands on sRGB (167, 245, 233) -
+ * saturation 0.32 - and the frames showed why that is too far: measured over the
+ * reference `lowwater` horizon the pale mix outnumbered the jade itself 2.7 to 1,
+ * so the mark's *average* colour was the washed tone rather than the chroma, and
+ * a low-chroma mint over any area at all reads as shallow ground. At 0.26 it is
+ * (136, 243, 225), saturation 0.44 - still clearly the brighter inner lip, still
+ * unmistakably the same jade. The hot tone is meant to be the highlight inside
+ * the stroke, not the stroke.
  */
-const TRANSLUCENT_HOT = PALETTE.waterTranslucent.clone().lerp(PALETTE.foam, 0.40);
+const TRANSLUCENT_HOT = PALETTE.waterTranslucent.clone().lerp(PALETTE.foam, 0.26);
 /** Glint colour: foam with a warm core, so the sun track is not just white. */
 const SPARKLE_COLOR = PALETTE.foam.clone().lerp(PALETTE.sunCore, 0.55);
 /** Ink for the foam contour. The scene ink, lifted so it reads as a line not a hole. */
@@ -513,26 +522,47 @@ export class Ocean {
       uTranslucentHot: { value: TRANSLUCENT_HOT.clone() },
       // Flat water sits at ndl 0.68 under this sun, so the window opens just
       // above that: only a face actively tilted into the sun clears it, which is
-      // exactly the sun-facing lip of a crest and not the shadow-side face.
-      uTransFacing: { value: new THREE.Vector2(0.70, 0.90) },
-      uTransThin: { value: new THREE.Vector2(0.52, 0.80) },
+      // exactly the sun-facing lip of a crest and not the shadow-side face. It
+      // opens marginally lower than it did (0.70 -> 0.66) to buy back the area
+      // the much narrower pinch ring below gives up - the ndl gate was never the
+      // term that was misfiring, so widening it costs nothing structural.
+      uTransFacing: { value: new THREE.Vector2(0.66, 0.88) },
+      uTransThin: { value: new THREE.Vector2(0.48, 0.74) },
       /**
        * The gate this term was missing: the surface has to actually be a crest.
        *
        * x/y is a window on the same Jacobian pinch the foam keys off. The lower
        * edge is where a lip starts to exist at all; z/w rolls the jade back off
-       * again at the very top of the pinch, where the whitecap takes over, so
-       * the jade sits as a band *under* the white rather than fighting it for
-       * the same pixels. That is also where subsurface light actually exits a
-       * wave - the foam is opaque, the shoulder below it is not.
+       * again at the top of the pinch, where the whitecap takes over, so the
+       * jade sits as a band *under* the white rather than fighting it for the
+       * same pixels. That is also where subsurface light actually exits a wave -
+       * the foam is opaque, the shoulder below it is not.
+       *
+       * Narrowed hard from (0.14, 0.46, 0.78, 1.00), and the roll-off in the
+       * shader is now total instead of 85%. Those numbers described a *cap* on
+       * the wave - open from a barely-there pinch all the way to the top, with a
+       * residue surviving even under the foam - and a cap is a fill. Measured on
+       * the reference frames it drew one connected jade mass over 2.9% of
+       * lowwater. What is wanted is the strip between "pinching" and "breaking",
+       * which on a real wave is a metre or two wide, and which in the far field -
+       * where the pinch field flattens into a plateau - traces that plateau's
+       * contour instead of painting its interior.
        */
-      uTransPinch: { value: new THREE.Vector4(0.14, 0.46, 0.78, 1.00) },
-      // The cuts are unchanged in spirit but the term feeding them is now a
-      // product of four gates rather than three, so the jade band sits a little
-      // lower and the hot lip a good deal further inside it: the hot colour is
-      // meant to be the minority mark, and at 0.45 it was most of the stroke.
-      uTransCut: { value: new THREE.Vector2(0.24, 0.52) },
-      uTransStrength: { value: new THREE.Vector2(0.90, 0.55) },
+      uTransPinch: { value: new THREE.Vector4(0.20, 0.40, 0.50, 0.72) },
+      /**
+       * x = uv per metre, y = feature cell, both fed to the shader's wbResolve.
+       * A lip may be drawn while a pixel covers less than about 4.3 m of sea and
+       * is gone by about 19 m - i.e. while a crest is still several pixels wide.
+       * See the lipRes block in water.ts for why this, and not any surface
+       * property, is what separates a stroke from a sandbar.
+       */
+      uTransResolve: { value: new THREE.Vector2(1 / 26.0, 0.55) },
+      // The lower cut opens the jade band wherever the ring exists at all; the
+      // upper one is well inside it, so the pale hot tone is the highlight in the
+      // stroke rather than the stroke. At the old 0.52 the hot colour won two
+      // pixels in three and the mark's average was the wash, not the chroma.
+      uTransCut: { value: new THREE.Vector2(0.18, 0.66) },
+      uTransStrength: { value: new THREE.Vector2(0.96, 0.42) },
       uTransFade: { value: new THREE.Vector2(160, 620) },
 
       // --- crest strokes ----------------------------------------------------

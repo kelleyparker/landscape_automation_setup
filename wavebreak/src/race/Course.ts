@@ -366,12 +366,17 @@ const GATE_COUNT = 12;
  * The real measure is the boat: 4.2 m long, with a standing rider whose head is
  * about 2.4 m off the water, on a sea whose swell is about a metre. Marine
  * furniture at that scale is a mark you pass, not a structure you drive under.
- * A 5 m attachment puts the banner's underside at 4.4 m - two metres of daylight
- * over the rider, which is enough that the span passes overhead and the eye
- * still reads under it, without the gate ever becoming the largest object in
- * the picture.
+ *
+ * 5.0 m was the settled value and it is still a little tall. Measured off the
+ * chase frame - the pylon's waterline collar to its banner clamp spanned 358 px
+ * of 1440 at a range of ~28 m, which back-solves to the 5 m it is built at - the
+ * near gate's span filled 68% of the frame width and its mast stood 1.33 boat
+ * lengths out of the water. 4.6 m puts the mast at 1.10 lengths and the banner's
+ * underside at 4.03 m over the masts and 5.23 m at the crown of the arch: 1.6 m
+ * of daylight over the rider at the worst point, which still reads as a span you
+ * pass under rather than one you duck.
  */
-const BANNER_Y = 5.0;
+const BANNER_Y = 4.6;
 /**
  * How far the middle of the span rises above its two attachment points, in
  * metres. Positive: this is an arch, not a sag. A straight bar at any height is
@@ -379,12 +384,14 @@ const BANNER_Y = 5.0;
  * through, and the curve is what stops it reading as a second horizon.
  *
  * Held at about 6% of the span, which is the same bow the 3 m rise gave the old
- * 50 m gates - the arch is a proportion of the shape, not an absolute.
+ * 50 m gates - the arch is a proportion of the shape, not an absolute. The span
+ * came in from 18-24 m to 15-20 m, so this follows it down.
  */
-const BANNER_RISE = 1.35;
+const BANNER_RISE = 1.20;
 const BANNER_HEIGHT = 1.15;
 const BANNER_THICKNESS = 0.13;
-const LAMP_Y = 5.8;
+/** Clear of the mast head at 5.10 m, so the drum sits *on* the spar. */
+const LAMP_Y = 5.30;
 /**
  * The drawn gate is *narrower than the course*, and deliberately.
  *
@@ -392,16 +399,23 @@ const LAMP_Y = 5.8;
  * gate built on that is 56 m of banner across the widest part of the circuit -
  * fourteen boat lengths, which is why it read as motorway gantry. A race marker
  * is something you aim at, so its span has to be a size the eye can judge
- * against the boat: 18 m at the tightest, 24 m at the widest, which is four to
- * six boat lengths and the width of a real slalom gate on water.
+ * against the boat.
+ *
+ * 18-24 m was that correction and it overshot by about a fifth. Measured off the
+ * chase frame: the near gate sat ~28 m out, where the frame is 35.3 m wide at
+ * this FOV, and its 24 m span covered 68% of the picture - 5.7 boat lengths of
+ * banner, which is why it still read as gantry rather than as a mark. 15-20 m is
+ * 3.6 to 4.8 lengths, which is both the width of a real slalom gate on water and
+ * a span the eye can measure a 4.2 m hull against in one glance.
  *
  * The *checkpoint* keeps the full course width - see `Gate.halfWidth`. Passing
  * outside the pylons but inside the course still counts, exactly as it does
  * around a real buoy course, and that split is what lets the marker be a
- * legible size without making the circuit harder to complete.
+ * legible size without making the circuit harder to complete. It is also what
+ * makes this trim free: nothing about where a boat may cross has changed.
  */
-const GATE_DRAW_MIN_HALF = 9;
-const GATE_DRAW_MAX_HALF = 12;
+const GATE_DRAW_MIN_HALF = 7.5;
+const GATE_DRAW_MAX_HALF = 10;
 const GATE_DRAW_RATIO = 0.55;
 /**
  * How much of the surface normal the moored furniture actually takes. A float
@@ -581,8 +595,13 @@ function buildPylonGeometry(): THREE.BufferGeometry {
   // mid-height step, which is there so the silhouette has a proportion in it at
   // range rather than being a bare taper.
   //
-  // Total 5.6 m from the water to the mast head, plus the lamp. Against a 4.2 m
-  // boat that is furniture you pass, which is the whole point.
+  // 5.10 m from the water to the mast head, plus the lamp - 1.21 boat lengths,
+  // trimmed with BANNER_Y from 5.60 (1.33) after measuring the near gate on the
+  // chase frame. Only the spar above the float scales: the float itself is a
+  // 1.24 m collar sized off what a hull could nudge aside, and that number has
+  // nothing to do with how tall the mast is. The banner clamp collar at
+  // 4.46-4.74 straddles BANNER_Y exactly, so the span attaches to hardware
+  // rather than to bare spar.
   return buildLathe([
     { y: -1.30, r: 0.20, color: dark },
     { y: -0.72, r: 0.44, color: dark },
@@ -590,13 +609,13 @@ function buildPylonGeometry(): THREE.BufferGeometry {
     { y: 0.22, r: 0.62, color: trim },
     { y: 0.50, r: 0.44, color: dark },
     { y: 0.72, r: 0.26, color: metal },
-    { y: 2.42, r: 0.22, color: metal },
-    { y: 2.60, r: 0.34, color: dark },
-    { y: 2.78, r: 0.20, color: metal },
-    { y: 4.94, r: 0.17, color: metal },
-    { y: 5.10, r: 0.29, color: dark },
-    { y: 5.24, r: 0.19, color: metal },
-    { y: 5.60, r: 0.16, color: metal },
+    { y: 2.24, r: 0.22, color: metal },
+    { y: 2.42, r: 0.34, color: dark },
+    { y: 2.60, r: 0.20, color: metal },
+    { y: 4.46, r: 0.17, color: metal },
+    { y: 4.60, r: 0.29, color: dark },
+    { y: 4.74, r: 0.19, color: metal },
+    { y: 5.10, r: 0.16, color: metal },
   ], 10, 'gatePylon');
 }
 
@@ -843,22 +862,51 @@ export class Course {
        * w = alpha multiplier - all at full grazing, all zero-weighted from above.
        *
        * The band scales move the *bright fraction* of the ribbon, not its
-       * silhouette: at 1.30 / 1.55 an edge-on strip goes from 20%/58% core/body
-       * to 26%/76%, so the handful of pixel rows it covers are mostly line
-       * instead of mostly sheath. The split between the two matters - 1.9 on the
-       * core was tried and it is wrong, because the core is `raceLineHot`, a
-       * near-white mint, and widening *that* turned the stroke pale: measured on
-       * the chase frame the line's mean saturation over water came out at 0.42
-       * while the pixel count barely moved. Growing the body instead grows the
-       * part of the ribbon that is actually green.
+       * silhouette. The core scale goes the other way from the body's, and that
+       * is deliberate: the core is `raceLineHot`, a near-white mint, and it is
+       * the right accent on a ribbon seen face-on - a thin filament in a wide
+       * green field - and the wrong one edge-on, where at 1.30 it was a quarter
+       * of the few pixel rows the ribbon owns. 0.75 shrinks it to a spine while
+       * the body grows to 76% of the half-width, so the pixels that are there
+       * are green.
        *
-       * 0.58 of body gain takes `raceLine` from luma 0.85 to 1.29, across the
-       * composer's 0.85 bright-pass threshold, so the line picks up the stylised
-       * bloom. Because it is a scalar multiply of the palette colour the hue is
-       * untouched, which is the point: green is the only cue that survives being
-       * composited over whitewater, and a white glow throws it away.
+       * The body gain is 0.22, down from 0.58, and the reduction is the point.
+       * `raceLine` is (0.107, 1.00, 0.337) in linear - its green is already at
+       * the ceiling, so gain past that moves red and blue and nothing else: 1.70
+       * composites to (117,255,212) against 1.34's (107,255,197), ten counts.
+       * What the extra gain really bought was luma 1.30 against the composer's
+       * 0.85 bright pass - a wide halo with no line inside it, which is the pale
+       * smear the chase frame showed. At 1.34 the body sits at luma 1.02: still
+       * over the threshold, so the line still glows and still glows *green*, but
+       * as a rim on a drawn stroke rather than as the stroke's replacement. The
+       * contrast now comes from `uContour` instead.
+       *
+       * 1.45 on the alpha, with the ramp tightened by `uContour.z`, is what
+       * makes those rows opaque line rather than half-strength fade.
        */
-      uGrazeGain: { value: new THREE.Vector4(1.30, 1.55, 0.58, 1.20) },
+      uGrazeGain: { value: new THREE.Vector4(0.75, 1.55, 0.22, 1.45) },
+      /**
+       * The drawn edge: x = width in *screen pixels*, y = its floor in |side|
+       * units, z = how far the alpha ramp's inner edge slides toward the
+       * silhouette at full grazing, w = the contour's darkness as a fraction of
+       * `uLine`.
+       *
+       * x is a pixel count and not a width in metres, which is the whole fix.
+       * The previous contour was 0.09 of half-width - 16 cm of water - so it was
+       * a visible band from altitude and a hundredth of a pixel from the chase
+       * camera, i.e. absent from the only view it was added for. Sized off
+       * `fwidth(|side|)` it is 2 px at every range and every foreshortening.
+       *
+       * y = 0.055 (9.6 cm) keeps it from collapsing to nothing in the first few
+       * metres, where the ribbon is wide on screen and the pixel width would put
+       * the edge inside a single texel of the band it is meant to bound.
+       *
+       * w = 0.27 of `uLine` is linear (0.029, 0.27, 0.091) - a dark *green*.
+       * Over foam that reads as the line's own shadow; the neutral dark that a
+       * previous pass used here is what stained every whitecap it crossed grey,
+       * and it is not coming back.
+       */
+      uContour: { value: new THREE.Vector4(2.0, 0.055, 0.45, 0.27) },
       uChevron: { value: new THREE.Vector2(1 / chevronPeriod, 0.42) },
       uScroll: { value: CHEVRON_SPEED },
       uOpacity: { value: RIBBON_OPACITY },

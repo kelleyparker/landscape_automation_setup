@@ -282,6 +282,15 @@ uniform vec2  uGrazeEdges;
  * multiplier - all at full grazing, all inert from above.
  */
 uniform vec4  uGrazeGain;
+/**
+ * The drawn edge, which is the only thing that gives the ribbon contrast
+ * against water brighter than it is.
+ *
+ * x = contour width in *screen pixels*, y = its floor in |side| units,
+ * z = how far the alpha ramp's inner edge slides toward the silhouette at full
+ * grazing, w = how dark the contour is as a fraction of uLine.
+ */
+uniform vec4  uContour;
 /** x = 1 / chevron period (per metre), y = how far the V is swept back. */
 uniform vec2  uChevron;
 /** Chevron travel in metres/second, in the direction of travel. */
@@ -317,9 +326,16 @@ void main() {
   // --- the grazing term -----------------------------------------------------
   // From altitude the ribbon is a clean legible circuit; from the chase camera
   // it is a filament, because a 3.5 m strip seen almost edge-on covers a handful
-  // of pixel rows and most of those rows are the soft sheath. Measured on the
-  // reference frames: 1 662 pixels of race-line green anywhere on the water in
-  // chase, out of 3.7 M.
+  // of pixel rows and most of those rows are the soft sheath.
+  //
+  // The first pass at this - band scales and a body gain, both keyed to grazing
+  // - moved the pixel count but not the read: measured on the reference frame,
+  // 4 005 pixels of race-line green over the water at mean saturation 0.57 and
+  // mean value 0.95. That is a pale wash, not a stroke, and the value says why:
+  // the ribbon had been made *brighter* against water that is already brighter
+  // than it. Everything below now spends the grazing term on contrast and hue
+  // instead - a drawn edge sized in pixels, a narrower white core, and enough
+  // gain to glow and no more.
   //
   // The fix has to be keyed to *that*, not applied globally, or it turns the
   // aerial view back into the green slab this ribbon has already been once. So
@@ -329,6 +345,13 @@ void main() {
   // is ~0.1 and every term below switches itself off.
   float face = abs(normalize(vViewNormal).z);
   float graze = 1.0 - smoothstep(uGrazeEdges.x, uGrazeEdges.y, face);
+
+  // How much |side| one screen pixel covers, right here. Edge-on the whole
+  // 3.5 m ribbon lands on a handful of pixel rows, so every band authored in
+  // metres is sub-pixel and averages away - which is the actual mechanism
+  // behind the pale smear the chase camera saw. Anything that has to survive
+  // that has to be sized in pixels, not in metres, and this is that number.
+  float pw = max(fwidth(a), 1e-5);
 
   // Widen the bright fraction, not the ribbon. Only the core and body edges move;
   // uBands.z and .w - the sheath and the alpha-zero point, i.e. the actual
@@ -342,7 +365,12 @@ void main() {
   float mGlow = wbInside(uBands.z, a, 0.35);
   float mBody = wbInside(bands.y, a, 0.35);
   float mCore = wbInside(bands.x, a, 0.35);
-  float mEdge = 1.0 - smoothstep(uBands.z, uBands.w, a);
+  // The alpha ramp's inner edge slides outward with grazing. From altitude it
+  // stays exactly at uBands.z; edge-on the sheath is compressed into the last
+  // pixel or two, so the pixel rows the ribbon does own are opaque line rather
+  // than half-strength fade. The silhouette, uBands.w, never moves.
+  float edgeLo = mix(uBands.z, uBands.w, uContour.z * graze);
+  float mEdge = 1.0 - smoothstep(edgeLo, uBands.w, a);
 
   // Chevrons. Skewing the phase by |side| turns a band across the ribbon into a
   // V pointing the way the boats travel; scrolling the same phase with time
@@ -373,17 +401,30 @@ void main() {
   // the actual green, so brightening the core pushes the filament past white and
   // the line stops separating from foam by hue - which was the whole argument
   // for green over the visor cyan in the first place. Scaling uLine is a scalar
-  // multiply, so the hue is exactly preserved while the luma goes from 0.85 to
-  // 1.29 - across the composite's 0.85 bright-pass threshold, so the glow the
-  // line picks up is a *green* glow.
+  // multiply, so the hue is exactly preserved.
+  //
+  // 0.22 of body gain, not 0.58, and that reduction is the point.
+  //
+  // uLine is (0.107, 1.00, 0.337) in linear, so its green is already at the
+  // ceiling: scaling it up moves red and blue and nothing else, and the result
+  // composites to (117,255,212) instead of (107,255,197) - ten counts. What the
+  // extra gain actually bought was luma 1.30 against the composer's 0.85 bright
+  // pass, i.e. a wide green halo with no line inside it, which is exactly the
+  // pale smear the chase frame showed. At 1.34 the body sits at luma 1.02: it
+  // still clears the threshold and still glows green, but as a rim on a drawn
+  // stroke rather than as the stroke's replacement.
   line = mix(line, uLine * (1.12 + uGrazeGain.z * graze), mBody);
-  line = mix(line, uHot * 1.10, arrow * mBody);
-  line = mix(line, uLine * 0.58, chevRule * mBody * 0.7);
+  // Both the arrows and the core are pulled back toward the line's own green
+  // when edge-on. uHot is a near-white mint; it is the right accent on a ribbon
+  // seen face-on, where it is a thin filament in a wide green field, and the
+  // wrong one edge-on, where it is most of the few pixel rows there are. Hue is
+  // the only cue that survives being composited over whitewater, and white has
+  // none of it.
+  line = mix(line, mix(uHot * 1.10, uLine * 1.62, graze * 0.45), arrow * mBody);
+  line = mix(line, uLine * mix(0.58, 0.34, graze), chevRule * mBody * (0.70 + 0.30 * graze));
   // The core filament runs unbroken through the arrows, so the line still reads
   // as one continuous path at a glance rather than as a row of separate marks.
-  // It stays at 1.25 from every camera: it is already the palest thing in the
-  // ribbon, and the only place it has left to go is white.
-  line = mix(line, uHot * 1.25, mCore);
+  line = mix(line, mix(uHot * 1.25, uLine * 1.55, graze * 0.70), mCore);
 
   // The line flares where the water is pinching itself together, i.e. exactly on
   // a crest. It is the same Jacobian the ocean's foam keys off, so the line
@@ -391,19 +432,33 @@ void main() {
   float crest = 1.0 - smoothstep(0.93, 1.01, vJac);
   line += uHot * crest * 0.14 * mBody;
 
-  // A one-pixel outer contour, in a deep shade of the line's OWN green.
+  // The drawn edge, in a deep shade of the line's OWN green - and sized in
+  // screen pixels, which is the whole change.
   //
-  // Two things make this safe, and both are load-bearing, because a dark band on
-  // this ribbon is a failure the project has already had: an ink separator here
-  // once stained every whitecap it crossed grey. First, the colour is uLine
-  // darkened - a dark *green*, which over foam reads as the line's own shadow
-  // rather than as dirt. Second, it is switched off exactly where the foam is:
-  // crest is the Jacobian pinch, the same field the ocean's whitecaps are
-  // thresholded from, so on water that is about to go white the contour is gone
-  // before it can stain it. It is also grazing-weighted, so it does not exist at
-  // all in the view where the ribbon is already legible.
-  float contour = clamp(wbInside(mix(uBands.z, uBands.w, 0.45), a, 0.35) - mGlow, 0.0, 1.0);
-  line = mix(line, uLine * 0.34, contour * graze * 0.60 * (1.0 - crest));
+  // The previous contour was authored in |side| space, 0.09 of half-width, i.e.
+  // 16 cm of water. Face-on that is a band; edge-on it is a hundredth of a pixel
+  // and it never appeared in the view it existed for, which is why the ribbon
+  // still read as an airbrushed gradient from the chase camera. Sized off
+  // fwidth(|side|) it is uContour.x pixels wide at every range and every
+  // foreshortening, so the ribbon has a silhouette even when it owns four pixel
+  // rows. That silhouette is what carries it over water brighter than it is: no
+  // amount of extra green can out-value foam, but a dark edge beside a bright
+  // body is contrast regardless of what is behind either of them.
+  //
+  // Two guards, both load-bearing, because a dark band on this ribbon is a
+  // failure the project has already had - an ink separator here once stained
+  // every whitecap it crossed grey. The colour is uLine darkened, so over foam
+  // it reads as the line's own shadow rather than as dirt; and it is switched
+  // off where crest (the Jacobian pinch the ocean thresholds its whitecaps from)
+  // says the water is about to go white.
+  //
+  // The cap keeps it from ever swallowing the body: at most half the gap between
+  // the core edge and the sheath, per side.
+  float cw = clamp(uContour.x * pw, uContour.y, max((uBands.z - bands.x) * 0.5, uContour.y));
+  float cOuter = mix(uBands.z, uBands.w, 0.30 + 0.35 * graze);
+  float contour = smoothstep(cOuter - cw - 0.5 * pw, cOuter - cw + 0.5 * pw, a)
+                * (1.0 - smoothstep(cOuter - 0.5 * pw, cOuter + 0.5 * pw, a));
+  line = mix(line, uLine * uContour.w, contour * (0.30 + 0.70 * graze) * (1.0 - crest));
 
   // --- the ribbon is lit by the sea it lies on -------------------------------
   // The vertices already ride the Gerstner surface, so the ribbon has the right

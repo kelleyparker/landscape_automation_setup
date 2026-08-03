@@ -16,7 +16,7 @@ can't say why — "the boat feels floaty in the hairpin" is a usable defect repo
 it into numbers from there.
 
 ```bash
-cd wavebreak && npm install && npm run dev
+npm install && npm run dev
 ```
 
 ---

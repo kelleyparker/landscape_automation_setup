@@ -10,7 +10,6 @@ built at runtime, every texture is drawn to a canvas or evaluated in a shader, a
 sound is synthesised with the Web Audio API.
 
 ```bash
-cd wavebreak
 npm install
 npm run dev
 ```

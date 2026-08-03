@@ -60,8 +60,30 @@ const TRACK_BODY = 5.2;
 const TRACK_LINE = 1.6;
 
 /** Racer dot radii, design pixels. */
-const DOT_AI = 3.6;
+const DOT_AI = 4.2;
 const DOT_PLAYER = 5.6;
+
+/**
+ * Minimum centre-to-centre spacing between two racer dots, design pixels.
+ *
+ * The circuit is 2.68 km squeezed into a 184 px well, so a scale of about
+ * 0.06 px/m: a pack running nose-to-tail over 40 m of road lands inside three
+ * pixels, and at t = 42 all three AI dots were drawn *entirely underneath* the
+ * player's disc — three of the four racers simply absent from the map. Slightly
+ * larger dots do not fix that; they make the blob bigger. Nudging coincident
+ * dots apart does, and it is what every racing minimap that works actually does.
+ *
+ * `DOT_PLAYER + DOT_AI + 1.6` is exactly touching-plus-an-ink-line, so a
+ * separated pair reads as two objects and nothing is displaced further than it
+ * has to be.
+ */
+const DOT_MIN_SEP = DOT_PLAYER + DOT_AI + 1.6;
+/**
+ * Relaxation passes over the pairwise separation. Two is enough at four racers:
+ * one pass separates every colliding pair, the second settles the case where
+ * pushing A off B pushed it onto C. It is 12 distance tests a frame.
+ */
+const SEP_PASSES = 2;
 
 // --------------------------------------------------------------- scratch -----
 
@@ -83,6 +105,10 @@ export class Minimap {
   private gateAY = new Float32Array(0);
   /** Index of the gate on the start/finish line. */
   private startGate = 0;
+
+  /** Racer dot positions in panel space, after separation. Preallocated. */
+  private readonly dotX = new Float32Array(8);
+  private readonly dotY = new Float32Array(8);
 
   // ------------------------------------------------------------- building ---
 
@@ -263,13 +289,24 @@ export class Minimap {
     this.drawStartMarker(ink, cx, cy, sc);
 
     // --- racers --------------------------------------------------------------
-    // AI first, player last: in a pack the dot that matters must be on top.
-    for (let i = 0; i < boats.length; i++) {
-      const b = boats[i] as Boat;
-      if (b.isPlayer) continue;
-      this.drawDot(ink, b, cx, cy, sc, false);
+    const n = Math.min(boats.length, this.dotX.length);
+    let playerIdx = -1;
+    for (let i = 0; i < n; i++) if ((boats[i] as Boat) === player) playerIdx = i;
+    this.layoutDots(boats, n, playerIdx, cx, cy, sc, s);
+
+    // AI in reverse place order, so if two still overlap the one further up the
+    // road is the one on top; the player last, so the dot that matters is never
+    // under a pack.
+    for (let place = n; place >= 1; place--) {
+      for (let i = 0; i < n; i++) {
+        const b = boats[i] as Boat;
+        if (b.isPlayer || b.progress.place !== place) continue;
+        this.drawDot(ink, b, this.dotX[i] as number, this.dotY[i] as number, false);
+      }
     }
-    this.drawDot(ink, player, cx, cy, sc, true);
+    if (playerIdx >= 0) {
+      this.drawDot(ink, player, this.dotX[playerIdx] as number, this.dotY[playerIdx] as number, true);
+    }
 
     c.restore(); // well clip
 
@@ -324,12 +361,79 @@ export class Minimap {
     }
   }
 
+  /**
+   * Projects every racer into panel space, then nudges coincident dots apart.
+   *
+   * The player is pinned: their dot is the answer to "where am I on the lap" and
+   * must stay exactly on the road. Everyone else is allowed to be displaced by up
+   * to a dot's width, which at this scale is about 25 m of course — well inside
+   * the error a 184 px map already has, and vastly better than the alternative,
+   * which was drawing three racers in a place nobody could see them.
+   *
+   * Allocates nothing: two preallocated arrays and at most 12 distance tests.
+   */
+  private layoutDots(
+    boats: Boat[],
+    n: number,
+    playerIdx: number,
+    cx: number,
+    cy: number,
+    sc: number,
+    s: number
+  ): void {
+    for (let i = 0; i < n; i++) {
+      const p = (boats[i] as Boat).state.position;
+      this.dotX[i] = cx + (p.x - this.midX) * sc;
+      this.dotY[i] = cy + (-p.z - this.midY) * sc;
+    }
+
+    const minSep = DOT_MIN_SEP * s;
+    const min2 = minSep * minSep;
+    for (let pass = 0; pass < SEP_PASSES; pass++) {
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          let dx = (this.dotX[j] as number) - (this.dotX[i] as number);
+          let dy = (this.dotY[j] as number) - (this.dotY[i] as number);
+          let d2 = dx * dx + dy * dy;
+          if (d2 >= min2) continue;
+          let d = Math.sqrt(d2);
+          if (d < 1e-4) {
+            // Exactly coincident, so there is no direction to separate along.
+            // The golden angle indexed by the pair gives a fixed, distinct
+            // bearing per pair — deterministic under the harness, and it fans a
+            // stacked pack out in a rosette instead of along one axis.
+            const a = (i * 3 + j) * 2.39996323;
+            dx = Math.cos(a);
+            dy = Math.sin(a);
+            d = 1;
+            d2 = 1;
+          }
+          const ux = dx / d;
+          const uy = dy / d;
+          const push = minSep - d;
+          // Against the player, the other dot takes the whole displacement.
+          if (i === playerIdx) {
+            this.dotX[j] = (this.dotX[j] as number) + ux * push;
+            this.dotY[j] = (this.dotY[j] as number) + uy * push;
+          } else if (j === playerIdx) {
+            this.dotX[i] = (this.dotX[i] as number) - ux * push;
+            this.dotY[i] = (this.dotY[i] as number) - uy * push;
+          } else {
+            const half = push * 0.5;
+            this.dotX[i] = (this.dotX[i] as number) - ux * half;
+            this.dotY[i] = (this.dotY[i] as number) - uy * half;
+            this.dotX[j] = (this.dotX[j] as number) + ux * half;
+            this.dotY[j] = (this.dotY[j] as number) + uy * half;
+          }
+        }
+      }
+    }
+  }
+
   /** One racer. The player gets a bigger disc, heavier ink and a heading arrow. */
-  private drawDot(ink: Ink, b: Boat, cx: number, cy: number, sc: number, isPlayer: boolean): void {
+  private drawDot(ink: Ink, b: Boat, px: number, py: number, isPlayer: boolean): void {
     const c = ink.ctx;
     const s = ink.s;
-    const px = cx + (b.state.position.x - this.midX) * sc;
-    const py = cy + (-b.state.position.z - this.midY) * sc;
     const col = RACER_CSS[((b.index % 4) + 4) % 4] as string;
     const r = (isPlayer ? DOT_PLAYER : DOT_AI) * s;
 

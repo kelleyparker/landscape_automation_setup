@@ -270,6 +270,12 @@ uniform vec2  uTransFacing;
 uniform vec2  uTransThin;
 /** Jacobian-pinch window: xy opens the lip, zw rolls it off under the whitecap. */
 uniform vec4  uTransPinch;
+/**
+ * How big a crest has to be on screen before a lip may be drawn on it.
+ * x = uv per metre for the resolve probe, y = the feature size in those units.
+ * See the lipRes block in main() - this is what keeps the mark a stroke.
+ */
+uniform vec2  uTransResolve;
 uniform vec2  uTransFade;
 
 // --- crest strokes ---------------------------------------------------------
@@ -589,19 +595,44 @@ void main() {
   // whitecap so it reads as the lip below the foam, and appears from every
   // camera because the pinch does.
   float backLook = clamp(-dot(V, L), 0.0, 1.0) * 0.5 + 0.5;
+  // A ring, not a cap. The window is deliberately narrow at both ends and the
+  // upper roll-off is now total rather than 85%: a backlit lip is the *shoulder*
+  // of a crest, the strip between "the surface has started to pinch" and "the
+  // whitecap owns these pixels", and it is a band a metre or two wide on a real
+  // wave. Held as a wide window instead - which is what a low bar plus a partial
+  // roll-off adds up to - it stops being a lip and becomes a fill over the whole
+  // top half of every swell. That matters far more than it sounds, because in the
+  // far field the pinch field is a broad plateau: thresholding a plateau paints
+  // its interior, whereas a narrow band in the same field traces its contour. One
+  // number decides whether this mark is a stroke or a plate, and it is this one.
   float pinch = smoothstep(uTransPinch.x, uTransPinch.y, crest)
-              * (1.0 - 0.85 * smoothstep(uTransPinch.z, uTransPinch.w, crest));
+              * (1.0 - smoothstep(uTransPinch.z, uTransPinch.w, crest));
   float thin = smoothstep(uTransFacing.x, uTransFacing.y, ndl)
              * smoothstep(uTransThin.x, uTransThin.y, h01)
              * (1.0 - smoothstep(uTransFade.x, uTransFade.y, vViewDepth));
-  // ...and the same guard the colour bands use. hFlat is 1 where this one pixel
-  // spans a quarter of the whole height range, i.e. where a complete swell has
-  // been foreshortened into a couple of screen rows. A "thin crest lip" drawn
-  // there is not a lip, it is every crest between here and the horizon summed
-  // into one horizontal band - which is precisely how a stroke turns back into a
-  // plate at a deck-height camera. Folding the jade out on the same signal that
-  // folds the bands out keeps the two marks agreeing about what is resolvable.
-  float trans = thin * pinch * (0.72 + 0.28 * backLook) * (1.0 - hFlat);
+  // ...and the mark is only allowed where a crest is still an object on screen.
+  //
+  // This is the guard that decides whether the jade reads as backlit water or as
+  // a reef. Every other gate here is a property of the surface, and a surface
+  // property cannot tell a stroke from a plate: from a deck-height camera the
+  // band of sea between roughly 150 m and the fog is compressed into a hundred
+  // screen rows, and *every* swell top inside it satisfies "sun-facing, high,
+  // pinching" at once. The measured result on the reference frames was a single
+  // connected jade mass covering 2.9% of lowwater and 0.8% of chase - a mint
+  // sandbar lying across the horizon.
+  //
+  // wbResolve on the parameter coordinate answers the one question that actually
+  // separates the two cases: how many metres of sea does this pixel cover? Under
+  // a few metres a crest is still several pixels wide and a lip can be drawn on
+  // it; past twenty a whole swell fits under a pixel and anything drawn there is
+  // an average of a hundred crests, which is a band by construction. Being a
+  // screen-space measure it adapts per camera by itself - a high camera resolves
+  // the sea for hundreds of metres and keeps its lips, a deck camera loses them a
+  // hundred metres out, which is exactly where its crests stop being visible as
+  // crests. hFlat is kept as well; it is the same idea read off h01 and it costs
+  // nothing to have both.
+  float lipRes = wbResolve(p * uTransResolve.x, uTransResolve.y);
+  float trans = thin * pinch * (0.72 + 0.28 * backLook) * (1.0 - hFlat) * lipRes;
   // Both cuts are held to a one-pixel step. At the old 0.30 ceiling fwidth
   // saturated the clamp at any real range and the "hard cut" became a 0.6-wide
   // ramp - a soft plate, not a drawn band, which is the second half of why this

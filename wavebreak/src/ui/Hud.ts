@@ -137,6 +137,12 @@ const LAP_FLASH_TIME = 0.85;
 const PLACE_PUNCH_TIME = 0.45;
 /** Seconds a drift-tier flash runs for. Short and hard — it is a hit, not a fade. */
 const TIER_FLASH_TIME = 0.34;
+/**
+ * Seconds the racing chrome takes to clear when the results card comes up. Short
+ * enough to read as a cut rather than a dissolve, and comfortably inside the
+ * 0.22 s the results board takes to assemble, so the two never overlap on screen.
+ */
+const CHROME_FADE = 0.18;
 
 // ------------------------------------------------------------------ colour ---
 
@@ -480,13 +486,37 @@ export class Ink {
     }
   }
 
-  /** Radiating cel speed lines, centred at (cx, cy) and scaled to `radius`. */
-  speedLines(cx: number, cy: number, radius: number, colour: string, spin = 0): void {
+  /**
+   * Radiating cel speed lines, centred at (cx, cy) and scaled to `radius`.
+   *
+   * `inkW` is a stroke weight in *screen* pixels. Without it the fan is a set of
+   * flat wedges, and over a bright sea that reads as haze rather than as ink —
+   * the rays have no edge, so nothing tells the eye they are drawn marks. Stroked
+   * first and filled second, so the ink sits behind the colour exactly as it does
+   * under every glyph and every panel in this HUD.
+   */
+  speedLines(
+    cx: number,
+    cy: number,
+    radius: number,
+    colour: string,
+    spin = 0,
+    inkW = 0
+  ): void {
     const c = this.ctx;
     c.save();
     c.translate(cx, cy);
     c.rotate(spin);
     c.scale(radius, radius);
+    if (inkW > 0 && radius > 0) {
+      // The burst is authored in unit space and the scale above multiplies the
+      // line width with everything else, so the weight is pre-divided to land as
+      // the authored pixel count whatever radius it was blown up to.
+      c.lineWidth = inkW / radius;
+      c.lineJoin = 'round';
+      c.strokeStyle = CSS.ink;
+      c.stroke(this.burst);
+    }
     c.fillStyle = colour;
     c.fill(this.burst);
     c.restore();
@@ -581,6 +611,16 @@ export class Hud {
   /** +1 the corner goes right, -1 it goes left. */
   private cornerSide = 1;
 
+  /**
+   * How much of the racing chrome — gauges, splits, position, minimap — is still
+   * on screen. The results card is a full-frame moment and has to own the frame;
+   * leaving the gauges parked at a third of their alpha underneath it reads as a
+   * layer someone forgot to turn off, and the ghosted POSITION badge actively
+   * contradicts the place printed in the table. So the chrome leaves rather than
+   * dimming, over a beat short enough to feel like a cut.
+   */
+  private chromeFade = 1;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
@@ -615,13 +655,11 @@ export class Hud {
     this.advance(dt, player, status, course);
 
     const phase = status.phase;
-    const gauges = phase !== 'intro';
-    // The results screen owns the frame; the gauges stay visible underneath but
-    // step back so the panel reads as the foreground layer.
-    const gaugeAlpha = phase === 'results' ? 0.32 : 1;
+    const chrome = this.chromeFade;
+    const gauges = phase !== 'intro' && chrome > 0;
 
     if (gauges) {
-      ink.alpha(gaugeAlpha);
+      ink.alpha(chrome);
       this.drawLapPanel(player, status);
       this.drawSplits(boats, player, status, course);
       this.drawPosition(player);
@@ -630,9 +668,11 @@ export class Hud {
       ink.alpha(1);
     }
 
-    ink.alpha(phase === 'results' ? 0.32 : 1);
-    this.minimap.render(ink, boats, player, course, this.t);
-    ink.alpha(1);
+    if (chrome > 0) {
+      ink.alpha(chrome);
+      this.minimap.render(ink, boats, player, course, this.t);
+      ink.alpha(1);
+    }
 
     if (gauges && player.progress.wrongWay && (phase === 'racing' || phase === 'finished')) {
       this.drawWrongWay();
@@ -679,6 +719,12 @@ export class Hud {
   private advance(dt: number, player: Boat, status: RaceStatus, course: Course): void {
     const pr = player.progress;
     const st = player.state;
+
+    // --- racing chrome ------------------------------------------------------
+    // A linear ramp rather than an exponential one, because an exponential never
+    // actually reaches zero and this has to be *gone*, not faintly present.
+    if (status.phase === 'results') this.chromeFade = Math.max(0, this.chromeFade - dt / CHROME_FADE);
+    else this.chromeFade = Math.min(1, this.chromeFade + dt / CHROME_FADE);
 
     // --- lap flourish -------------------------------------------------------
     if (pr.lap !== this.lastLap) {
@@ -733,9 +779,22 @@ export class Hud {
    * the peak, because that is what the corner actually is.
    *
    * Handedness cannot come from `curvatureAt` (it returns a magnitude), so it is
-   * recovered from the cross product of the tangent either side of the peak —
-   * the same sign convention `Course` builds its own curvature table with:
-   * a positive cross means the tangent swung to the right of travel.
+   * recovered from the cross product of the tangent either side of the peak.
+   *
+   * The sign convention is the one the hull uses, and it is worth deriving here
+   * because the obvious reading of it is backwards. Heading 0 faces +Z and
+   * forward(h) = (sin h, cos h), so increasing h rotates forward toward +X, which
+   * is starboard: a right-hand corner is a corner whose tangent heading is
+   * *rising*. Writing the two tangents as forward(h0) and forward(h1),
+   *
+   *     cross = a.x*b.z - a.z*b.x = sin(h0)cos(h1) - cos(h0)sin(h1) = -sin(h1-h0)
+   *
+   * so a right-hander turns the heading up and drives the cross product
+   * *negative*. Measured over all six corners of "Anchorline" by sampling the
+   * heading derivative directly: `cross < 0` agrees with the real handedness at
+   * 100% of 172 samples, and the opposite mapping agrees at 0% — this widget used
+   * to point away from every corner on the circuit. It now matches
+   * `AIController`, which had the same cross product and the correct mapping.
    */
   private scanCorner(course: Course, tNow: number): boolean {
     const L = course.totalLength;
@@ -776,7 +835,7 @@ export class Hud {
 
     this.cornerDist = entry * CORNER_STEP;
     this.cornerSev = clamp((peakK - CORNER_K_MIN) / (CORNER_K_MAX - CORNER_K_MIN), 0, 1);
-    this.cornerSide = cross > 0 ? 1 : -1;
+    this.cornerSide = cross < 0 ? 1 : -1;
     return true;
   }
 
