@@ -9,18 +9,94 @@ model files, no textures, no HDRIs and no audio samples — every mesh is `Buffe
 built at runtime, every texture is drawn to a canvas or evaluated in a shader, and every
 sound is synthesised with the Web Audio API.
 
+---
+
+## Play it
+
+You need two things: **Node 20.19+ or 22.12+** (Vite 8's floor) and **Chrome**. Install is
+about five seconds and 36 packages, and nothing is downloaded at runtime.
+
+Pick your platform — each set of steps is complete on its own.
+
+### macOS — Apple silicon (M1/M2/M3/M4) or Intel
+
 ```bash
+# 1. Node. Check what you have first:
+node -v                     # need v20.19+ or v22.12+
+
+#    If it is missing or too old:
+brew install node           # or grab the installer from https://nodejs.org
+
+# 2. Get the game and run it
+git clone https://github.com/kelleyparker/cel-shaded-boat-racing-game
+cd cel-shaded-boat-racing-game
 npm install
 npm run dev
 ```
 
-Then open the printed URL. That is the whole setup — install is about five seconds and
-36 packages, and nothing is downloaded at runtime.
+Open the printed URL — normally <http://localhost:5173> — in **Chrome**.
 
-**Requirements:** Node 20.19+ or 22.12+ (Vite 8's floor — `node -v` to check), and any
-browser with WebGL2. Developed and verified against Chrome; Apple silicon is the target
-hardware. The renderer uses multiple render targets and half-float textures, both of which
-are core WebGL2, so anything from the last few years will run it.
+### Windows 11
+
+Use **PowerShell** or **Windows Terminal**.
+
+```powershell
+# 1. Node. Check what you have first:
+node -v                          # need v20.19+ or v22.12+
+
+#    If it is missing or too old:
+winget install OpenJS.NodeJS.LTS # or grab the installer from https://nodejs.org
+```
+
+**Close that terminal and open a new one after installing Node**, or `node` will not be on
+your `PATH` yet. This is the single most common thing to trip over on Windows.
+
+```powershell
+# 2. Get the game and run it
+git clone https://github.com/kelleyparker/cel-shaded-boat-racing-game
+cd cel-shaded-boat-racing-game
+npm install
+npm run dev
+```
+
+Open the printed URL — normally <http://localhost:5173> — in **Chrome** or **Edge**.
+
+> **Laptops with two GPUs:** Windows may hand Chrome the integrated GPU, which will cost
+> you a lot here — this renderer is fill-rate bound, so it cares about that choice far more
+> than a normal web page does. *Settings → System → Display → Graphics → Chrome → High
+> performance.*
+
+### Once it is running — both platforms
+
+- **Click the page once** before you expect sound. Browsers block audio until you interact.
+- **F3** shows the performance overlay: real GPU milliseconds, CPU milliseconds, draw calls
+  and a frame-time graph with the 60fps budget drawn as a dashed line.
+- **Esc** pauses and opens settings (resolution, ink lines, glow, volume, screen shake).
+- `PLAYTEST.md` is a five-minute checklist if you want to give useful feedback.
+
+Prefer a double-clickable app to a dev server? There is an Electron shell under
+`desktop/` — see [Publishing](#publishing).
+
+### If it does not run
+
+| Symptom | Cause |
+| --- | --- |
+| `Unsupported engine` or a Vite crash on start | Node is too old. `node -v` must be 20.19+ or 22.12+. |
+| `Port 5173 is already in use` | `npm run dev -- --port 5174` |
+| `node` not recognised (Windows) | Open a fresh terminal so `PATH` updates. |
+| Black screen, errors in the browser console | Your browser or GPU is not giving you WebGL2. |
+| F3 says GPU "unavailable" | Your browser lacks `EXT_disjoint_timer_query_webgl2`. Chrome has it, Safari does not. Everything else still works. |
+
+**On Safari:** it has WebGL2, but this renderer leans hard on GLSL3, multiple render
+targets and half-float textures, which is the corner of WebGL2 Safari has historically been
+weakest in. Chrome is the recommended browser on macOS.
+
+**What has actually been tested, honestly:** every frame in this repo was rendered by
+*headless Chromium with SwiftShader* — a software rasteriser — in a Linux container. The
+typecheck, the production build and the game booting without console errors are all
+verified there. But **no Mac and no Windows machine has ever run this**, and no real GPU
+has ever been measured. The renderer only uses core WebGL2, so it should be fine on
+anything from the last few years; F3 is how you find out what it actually does on yours.
 
 Playwright is a dev dependency for the screenshot harness only. It does **not** download a
 browser on install — the game itself never touches it.
