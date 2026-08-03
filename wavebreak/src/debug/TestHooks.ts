@@ -45,6 +45,7 @@ export interface WavebreakHooks {
   setInput(partial: Partial<BoatInput> | null): void;
   phase(name: string): void;
   autopilot(on: boolean): void;
+  setHud(on: boolean): void;
   stats(): Record<string, number | string>;
   game: Game;
 }
@@ -92,6 +93,8 @@ export function installTestHooks(game: Game): void {
     phase(name: string): void { game.director.forcePhase(name as never); },
 
     autopilot(on: boolean): void { game.setAutopilot(on); },
+
+    setHud(on: boolean): void { game.hudEnabled = on; },
 
     stats(): Record<string, number | string> {
       const info = engine.renderer.info;

@@ -1,0 +1,41 @@
+{
+  "name": "wavebreak-desktop",
+  "productName": "WAVEBREAK",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop shell for WAVEBREAK - Steam-ready packaging around the web build.",
+  "main": "main.cjs",
+  "author": "Kelley Parker",
+  "license": "MIT",
+  "//": "Kept as its own npm project on purpose: Electron is ~180MB and would turn the game's own five-second `npm install` into a multi-minute one. Nobody who just wants to play in a browser should pay for that.",
+  "scripts": {
+    "stage": "node stage.mjs",
+    "start": "npm run stage && electron .",
+    "pack": "npm run stage && electron-builder --dir",
+    "dist": "npm run stage && electron-builder",
+    "dist:mac": "npm run stage && electron-builder --mac",
+    "dist:win": "npm run stage && electron-builder --win",
+    "dist:linux": "npm run stage && electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.kelleyparker.wavebreak",
+    "productName": "WAVEBREAK",
+    "directories": { "output": "release" },
+    "files": ["main.cjs", "game/**/*", "package.json"],
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }, { "target": "zip", "arch": ["arm64", "x64"] }]
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "portable", "arch": ["x64"] }]
+    },
+    "linux": {
+      "category": "Game",
+      "target": ["AppImage"]
+    }
+  }
+}
