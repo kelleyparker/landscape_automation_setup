@@ -40,6 +40,7 @@ function parseArgs(argv) {
     quiet: false,
     settle: 0,
     noDrive: false,
+    noHud: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -54,6 +55,7 @@ function parseArgs(argv) {
     else if (a === '--seed') out.seed = Number(next());
     else if (a === '--settle') out.settle = Number(next());
     else if (a === '--no-drive') out.noDrive = true;
+    else if (a === '--no-hud') out.noHud = true;
     else if (a === '--keep') out.keep = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--list') out.list = true;
@@ -189,6 +191,8 @@ async function main() {
     // Frames of a parked boat prove nothing about wake, spray, drift or landings,
     // so the harness races the player unless explicitly told not to.
     if (!ARGS.noDrive) await page.evaluate(() => window.__wavebreak.autopilot(true));
+    // Clean frames for press art: no cropped HUD panels at the capsule edges.
+    if (ARGS.noHud) await page.evaluate(() => window.__wavebreak.setHud(false));
     log(`> advancing sim to t=${ARGS.time}s`);
     await page.evaluate((t) => window.__wavebreak.advanceTo(t), ARGS.time);
 

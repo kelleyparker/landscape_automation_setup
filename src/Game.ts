@@ -42,6 +42,14 @@ export class Game {
 
   player: Boat;
 
+  /**
+   * Draw the HUD at all. Off produces a clean gameplay frame, which is what
+   * store capsules and press art want - a cropped speedometer at the edge of a
+   * capsule reads as a screenshot someone forgot to clean up.
+   */
+  hudEnabled = true;
+  private readonly hudCanvas: HTMLCanvasElement;
+
   constructor(container: HTMLElement, hudCanvas: HTMLCanvasElement) {
     this.engine = new Engine({ container });
     this.cameraRig = new CameraRig(this.engine.camera);
@@ -86,6 +94,7 @@ export class Game {
     this.director = new RaceDirector(this.boats, this.course, 3);
     this.composer = new Composer(this.engine);
     this.hud = new Hud(hudCanvas);
+    this.hudCanvas = hudCanvas;
     this.audio = new Audio();
 
     this.wire();
@@ -133,7 +142,12 @@ export class Game {
       if (st.landingImpact > 0.05) this.cameraRig.addShake(st.landingImpact * 0.55);
       if (st.hitImpact > 0.05) this.cameraRig.addShake(st.hitImpact * 0.4);
       this.ocean.follow(this.engine.camera);
-      this.hud.render(this.boats, this.player, this.director.status, this.engine, this.course);
+      if (this.hudEnabled) {
+        this.hud.render(this.boats, this.player, this.director.status, this.engine, this.course);
+      } else {
+        const ctx = this.hudCanvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+      }
     });
 
     e.setRenderFn(() => this.composer.render());
