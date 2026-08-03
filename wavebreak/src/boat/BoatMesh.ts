@@ -59,6 +59,31 @@ import { addOutlineRecursive } from '../render/OutlineHull';
 const NEUTRAL = new THREE.Color(1, 1, 1);
 
 /**
+ * VALUE BLOCKING ON THE HULL.
+ *
+ * These three are pure greys fed into the hull group's `color` attribute, which
+ * `CelMaterial` multiplies against `uColor` - i.e. against the racer's own
+ * colour. They are not colours: they carry no hue, they only say how far down
+ * the value scale a given panel sits, and the racer's hue survives all three.
+ *
+ * They exist because the hull is one lofted surface and the ramp could not tell
+ * its panels apart. The topside, the spray-rail band under the knuckle and the
+ * bottom all lean within about fifty degrees of each other, which on a four-band
+ * ramp is one band for the lot - measured off the shipped frames, the whole
+ * flank came out as a single flat field of racer colour with the knuckle and the
+ * chine invisible inside it. Steepening the creases cannot fix that: the bands
+ * are quantised, so the fix has to be in the albedo.
+ *
+ * Descending, never ascending: a topside at full value over a half-value spray
+ * band over a dark bottom is the bootstripe every real hull wears, it puts a
+ * hard step exactly on the knuckle and another exactly on the chine, and it is
+ * legible whatever the light is doing.
+ */
+const V_TOPSIDE = new THREE.Color(1, 1, 1);
+const V_SPRAY = new THREE.Color(0.66, 0.66, 0.66);
+const V_BOTTOM = new THREE.Color(0.38, 0.38, 0.38);
+
+/**
  * Eleven stations from transom to stem. Spacing tightens forward, where the
  * section changes fastest - an even spread puts the same number of rings under
  * the flat planing pad, which needs almost none, as under the entry, which needs

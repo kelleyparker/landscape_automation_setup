@@ -46,6 +46,8 @@ export interface WavebreakHooks {
   phase(name: string): void;
   autopilot(on: boolean): void;
   setHud(on: boolean): void;
+  freezeCamera(on: boolean): void;
+  redraw(n: number): void;
   stats(): Record<string, number | string>;
   game: Game;
 }
@@ -95,6 +97,26 @@ export function installTestHooks(game: Game): void {
     autopilot(on: boolean): void { game.setAutopilot(on); },
 
     setHud(on: boolean): void { game.hudEnabled = on; },
+
+    /**
+     * Pin the camera exactly where it is. The named shots all re-derive from
+     * live boat state every frame, and the chase rig advances its spring, so a
+     * "static camera" test needs the rig to stop touching the camera at all.
+     */
+    freezeCamera(on: boolean): void {
+      game.cameraRig.mode = on ? 'free' : 'chase';
+    },
+
+    /**
+     * Redraw without advancing time. Every subsystem ticks with dt = 0 and the
+     * shader clock does not move, so two consecutive redraws MUST produce
+     * identical pixels. Any difference is real nondeterminism - an
+     * uninitialised buffer, a per-frame random, a feedback loop - and that is
+     * a class of bug a still frame can never reveal.
+     */
+    redraw(n: number): void {
+      for (let i = 0; i < n; i++) engine.step(0);
+    },
 
     stats(): Record<string, number | string> {
       const info = engine.renderer.info;
