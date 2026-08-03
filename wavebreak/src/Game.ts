@@ -19,6 +19,7 @@ import { Composer } from './render/Composer';
 import { Hud } from './ui/Hud';
 import { PauseMenu } from './ui/PauseMenu';
 import { Settings } from './core/Settings';
+import { PerfOverlay } from './debug/PerfOverlay';
 import { Audio } from './audio/Audio';
 
 /**
@@ -43,6 +44,7 @@ export class Game {
   readonly audio: Audio;
   readonly settings = new Settings();
   readonly pauseMenu: PauseMenu;
+  readonly perf: PerfOverlay;
 
   player: Boat;
 
@@ -109,6 +111,13 @@ export class Game {
       () => { this.paused = false; this.restart(); }
     );
 
+    // ?debug starts it visible; F3 toggles. Constructed after the composer so
+    // the GL context and its timer extension are already live.
+    this.perf = new PerfOverlay(
+      this.engine,
+      typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')
+    );
+
     this.applySettings();
     this.wire();
     this.cameraRig.snap(this.player, 0);
@@ -165,7 +174,13 @@ export class Game {
       this.drawOverlay(dt);
     });
 
-    e.setRenderFn(() => this.composer.render());
+    e.setRenderFn(() => {
+      // The timer query must bracket the actual draw commands, which is why
+      // this wraps the composer rather than living inside Engine.step.
+      this.perf.beginFrame();
+      this.composer.render();
+      this.perf.endFrame();
+    });
 
     this.input.onRestart(() => this.restart());
 
@@ -173,6 +188,7 @@ export class Game {
     // boat never reads them.
     this.input.onKeyPress((code) => {
       if (this.pauseMenu.handleKey(code)) return true;
+      if (code === 'F3') { this.perf.toggle(); return true; }
       if (code === 'Escape') { this.paused = true; this.pauseMenu.show(); return true; }
       return false;
     });
@@ -200,6 +216,13 @@ export class Game {
       ctx.save();
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.pauseMenu.render(ctx, window.innerWidth, window.innerHeight, dt);
+      ctx.restore();
+    }
+    if (ctx && this.perf.visible) {
+      const dpr = this.hudCanvas.width / Math.max(1, window.innerWidth);
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      this.perf.render(ctx, window.innerWidth, window.innerHeight);
       ctx.restore();
     }
   }
