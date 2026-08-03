@@ -147,6 +147,57 @@ Targeting a locked 60fps at `devicePixelRatio` 2 on Apple silicon:
   pass; render targets allocated once and reused.
 - No per-frame allocation in any `update()` — scratch vectors live at module scope.
 
+## Publishing
+
+The build is a self-contained static bundle — no server, no runtime downloads — so it
+deploys anywhere that serves files, and wraps into a desktop app without changes.
+
+### Web
+
+`.github/workflows/deploy.yml` runs on every push to `main`: typecheck, build, then a
+**real-browser smoke run** (`tools/shoot.mjs`) before anything reaches a public URL. A
+shader that fails to compile is a clean build and a black screen, so "it compiled" is not
+a release gate.
+
+- **GitHub Pages** — enable it at *Settings → Pages → Source: GitHub Actions*. Nothing else.
+- **itch.io** — add repository secret `BUTLER_API_KEY` (itch.io → *Settings → API keys*)
+  and repository variable `ITCH_TARGET` (e.g. `you/wavebreak`). The job skips itself with
+  an explanatory message until both exist.
+  On the itch page set kind **HTML**, tick *This file will be played in the browser*,
+  viewport **1280×720**, and enable the fullscreen button. The game wants a keyboard.
+
+### Desktop / Steam
+
+```bash
+npm run build            # the web build first
+cd desktop
+npm install
+npm start                # run it
+npm run dist:mac         # or dist:win / dist:linux
+```
+
+`.github/workflows/desktop.yml` builds a macOS/Windows/Linux matrix on any `v*` tag.
+Artefacts are **unsigned** — macOS needs a right-click → Open, Windows shows a SmartScreen
+warning — until you add an Apple Developer ID and a Windows signing certificate.
+
+Steam itself needs: the **$100 Steam Direct fee** per app, tax and banking onboarding, a
+**30-day wait** between app setup and release, and a store page public 2 weeks before
+launch. Steamworks SDK integration is *not* required for a first release — ship the plain
+executable and add achievements later.
+
+### Store art
+
+```bash
+node tools/marketing.mjs
+```
+
+Captures 4K frames from the deterministic harness and composes itch.io cover art, every
+Steam capsule size, and 1080p gallery screenshots into `press/`. Two passes: gallery shots
+keep the HUD because a store gallery should show what playing looks like, capsules use
+clean frames because a capsule cropped through a speedometer reads as an unfinished page.
+Re-check Steam's capsule dimensions against current Steamworks docs before uploading —
+Valve changes them.
+
 ## State of the build
 
 An honest scorecard, judged against captured frames rather than against whether the code
