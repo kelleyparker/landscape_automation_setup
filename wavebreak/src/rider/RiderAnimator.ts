@@ -282,6 +282,19 @@ export class RiderAnimator {
   // ------------------------------------------------------------- the tick --
 
   update(dt: number, elapsed: number, state: BoatState, phase: string): void {
+    // dt === 0 means "redraw, do not advance time" - a paused frame, or the
+    // harness's frozen mode. The clamp below has a lower bound for numerical
+    // stability, so without this guard a zero-length frame still integrates a
+    // full 1/240 step and the rider keeps moving while the world is stopped.
+    //
+    // That is exactly what tools/sequence.mjs --mode frozen caught: with the
+    // sim halted and the camera pinned, the only pixels still changing in the
+    // whole image were the riders' heads and scarves. It matters beyond the
+    // assertion - on a paused game the scarf would carry on fluttering.
+    // Returning early is correct: every bone keeps the transform it was last
+    // posed with, which is what a frozen frame should show.
+    if (dt <= 0) return;
+
     // Clamp before anything differentiates or integrates: one 250ms hitch must
     // not turn into a rider doing the splits.
     const h = clamp(dt, 1 / 240, 1 / 30);

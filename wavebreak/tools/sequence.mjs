@@ -15,8 +15,15 @@
  *             frames MUST be pixel-identical. Any difference at all is a real
  *             nondeterminism bug: an uninitialised buffer, a per-frame random,
  *             a feedback loop. This is an assertion, not a judgement call.
- *   static  - camera fixed, sim advancing. Isolates surface crawl: water that
- *             shimmers, foam that boils, sparkles that strobe.
+ *   static  - camera fixed, sim advancing. Intended to isolate surface crawl:
+ *             water that shimmers, foam that boils, sparkles that strobe.
+ *             CAVEAT, measured: with the camera pinned the boats keep driving
+ *             through the frame, and a hull crossing a pixel registers as a
+ *             luminance reversal exactly like a shimmer does. On the `lowwater`
+ *             shot that put 12.8% of pixels in the strobe bucket, ~all of it the
+ *             boat's own motion. To read this mode as a water number, point it
+ *             at empty sea (`--shot horizon`) or stop the boats first; otherwise
+ *             treat the figure as an upper bound, not a defect count.
  *   motion  - normal gameplay. Isolates popping, swimming and LOD transitions.
  *
  * The headline metric is STROBE, not mean difference. A pixel that brightens
